@@ -22,6 +22,7 @@ export interface Finding {
   owner?: string;
   aiVerdict: 'TP' | 'FP' | 'INCONCLUSIVE' | 'PENDING';
   swarmRationale: string;
+  codeSnippet?: string;
   exploitPath?: string;
   exploitVerified?: boolean;
   exploitOutput?: string;
@@ -85,6 +86,10 @@ export interface LogEntry {
   agent: string;
   content: string;
   ts: number;
+  finding?: any;
+  verdict?: string;
+  rationale?: string;
+  metrics?: any;
 }
 
 // ── Triage Finding (parsed from SSE) ─────────────────────────────────────────

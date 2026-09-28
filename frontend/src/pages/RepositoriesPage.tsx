@@ -150,7 +150,8 @@ export default function RepositoriesPage({ repositories, onAddRepo, onRemoveRepo
             <span style={{ color: '#e2e8f0', fontWeight: 600 }}>Add Repository</span>
           </div>
           <p style={{ color: '#475569', fontSize: 13, marginBottom: 12 }}>
-            Enter a public GitHub/GitLab URL or a local absolute path.
+            Register a public GitHub/GitLab URL or a local absolute path to make it available for scanning. 
+            Note: Local paths refer to directories on the machine running the backend server, not your personal computer.
           </p>
           <div style={{ display: 'flex', gap: 8 }}>
             <input

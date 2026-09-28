@@ -58,10 +58,10 @@ from agents.schema_validator import filter_findings
 from agents.memory import get_conn, make_db_path, set_meta, record_finding
 
 # Always emit structured JSON so the backend can parse it
-_EMIT = lambda log_type, agent, content: print(
-    json.dumps({"type": log_type, "agent": agent, "content": content}),
-    flush=True,
-)
+def _EMIT(log_type, agent, content, **kwargs):
+    payload = {"type": log_type, "agent": agent, "content": content}
+    payload.update(kwargs)
+    print(json.dumps(payload), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +207,7 @@ def run_swarm_triage(
     chunks: list[CodeChunk],
     repo_map: RepoMap,
     metrics: MetricsEngine,
+    num_workers: int = 3,
 ) -> list[dict]:
     """
     Run the investigation agents across all high-priority SAST alerts.
@@ -214,8 +215,10 @@ def run_swarm_triage(
     repo_summary = repo_map_to_summary(repo_map)
     priority_sast = [f for f in sast_findings if f["severity"] in ("CRITICAL", "HIGH", "MEDIUM")][:30]
 
+    roles_to_use = INVESTIGATION_AGENT_ROLES[:num_workers] if num_workers < len(INVESTIGATION_AGENT_ROLES) else INVESTIGATION_AGENT_ROLES
+
     _EMIT("PHASE", "orchestrator",
-          f"PHASE 2 — SWARM TRIAGE: {len(INVESTIGATION_AGENT_ROLES)} agents × {len(priority_sast)} alerts")
+          f"PHASE 2 — SWARM TRIAGE: {len(roles_to_use)} agents × {len(priority_sast)} alerts")
 
     triage_results = []
 
@@ -231,7 +234,7 @@ def run_swarm_triage(
         _EMIT("WORKER", "orchestrator", f"[{i+1}/{len(priority_sast)}] Investigating {sf['file']}:{sf['line']}")
         
         agent_verdicts = []
-        for agent_key, agent_focus in INVESTIGATION_AGENT_ROLES:
+        for agent_key, agent_focus in roles_to_use:
             prompt = build_investigation_prompt(sf, context_chunk, repo_summary, agent_focus)
             metrics.record_token_usage(len(prompt), 0)
 
@@ -275,7 +278,7 @@ def run_swarm_triage(
         # Otherwise -> INCONCLUSIVE
         
         has_tp = any(av["verdict"] == "TP" for av in agent_verdicts)
-        all_high_fp = all(av["verdict"] == "FP" and av["confidence"] == "HIGH" for av in agent_verdicts)
+        all_high_fp = len(agent_verdicts) > 0 and all(av["verdict"] == "FP" and av["confidence"] == "HIGH" for av in agent_verdicts)
         
         if has_tp:
             final_verdict = "TP"
@@ -297,7 +300,7 @@ def run_swarm_triage(
         })
         
         v_str = f"✓ TP" if final_verdict == "TP" else (f"✗ FP" if final_verdict == "FP" else "⋯ INCONCLUSIVE")
-        _EMIT("VERDICT", "triage", f"[{i+1}/{len(priority_sast)}] Consensus: {v_str}")
+        _EMIT("VERDICT", "triage", f"[{i+1}/{len(priority_sast)}] Consensus: {v_str}", finding=sf, verdict=final_verdict, rationale=" | ".join(consensus_rationale))
 
     return triage_results
 
@@ -351,8 +354,6 @@ def _dynamic_filter_findings(
     agent_id: str,
 ) -> tuple[list[dict], list[dict]]:
     """Apply dynamic schema gate using the repo-derived hallucination pattern."""
-    from agents.schema_validator import REQUIRED_FIELDS
-
     valid, rejected = [], []
     for f in findings:
         # Field completeness
@@ -381,6 +382,145 @@ def _dynamic_filter_findings(
 
 
 # ---------------------------------------------------------------------------
+# Discovery & Challenge Passes
+# ---------------------------------------------------------------------------
+
+def _chunk_risk_score(chunk: CodeChunk) -> int:
+    score = 0
+    path = chunk.file_path.lower()
+    if any(k in path for k in ["auth", "login", "security", "crypto", ".github", "config", "docker", "jwt", "secret", "password", "oauth"]):
+        score += 10
+    if chunk.chunk_type in ["config", "module"]:
+        score += 5
+    return score
+
+def run_swarm_discovery(
+    client: LLMClient,
+    conn,
+    chunks: list[CodeChunk],
+    repo_map: RepoMap,
+    metrics: MetricsEngine,
+    max_chunks: int,
+    hallucination_pattern
+) -> list[dict]:
+    repo_summary = repo_map_to_summary(repo_map)
+    
+    chunks_to_scan = sorted(chunks, key=_chunk_risk_score, reverse=True)[:max_chunks]
+    
+    _EMIT("PHASE", "orchestrator", f"PHASE 3 — DISCOVERY: Hunting for novel flaws in {len(chunks_to_scan)} highest-risk chunks")
+
+    discovery_results = []
+    
+    for i, chunk in enumerate(chunks_to_scan):
+        _EMIT("WORKER", "orchestrator", f"[{i+1}/{len(chunks_to_scan)}] Scanning {chunk.file_path}")
+        prompt = textwrap.dedent(f"""\\
+            You are a senior security researcher looking for complex logic flaws.
+            {repo_summary}
+            
+            === CODE TO ANALYSE ===
+            File: {chunk.file_path}
+            {chunk.content}
+            
+            Find exploitable vulnerabilities. Output each finding in this format:
+            FINDING:
+            Title: <title>
+            Location: <line number>
+            Path: <file path>
+            Property: <vulnerability type>
+            AttackerInput: <how attacker reaches this>
+            Consequence: <impact>
+            Severity: CRITICAL|HIGH|MEDIUM|LOW
+            ---
+        """)
+        try:
+            response = client.generate(prompt=prompt, temperature=0.2)
+        except Exception as e:
+            _EMIT("ERROR", "discovery", f"LLM error: {e}")
+            continue
+
+        raw_findings = _parse_findings_from_response(response, chunk)
+        metrics.record_llm_raw(len(raw_findings))
+        valid_findings, rejected = _dynamic_filter_findings(raw_findings, hallucination_pattern, "discovery")
+        metrics.record_schema_results(len(valid_findings), len(rejected))
+        for f in valid_findings:
+            f["chunk_idx"] = i
+            try:
+                line_num = int(str(f.get("location")).split()[0])
+            except (ValueError, TypeError, IndexError):
+                line_num = chunk.start_line
+            # Transform to standard triage finding format
+            formatted_finding = {
+                "file": chunk.file_path,
+                "line": line_num,
+                "message": f.get("title"),
+                "severity": f.get("severity", "MEDIUM"),
+                "code": f.get("snippet", chunk.content),
+                "tool": "swarm_discovery",
+                "rule_id": "discovery-001"
+            }
+            discovery_results.append(formatted_finding)
+            _EMIT("SYSTEM", "discovery", f"Found novel issue: {f.get('title')}")
+    return discovery_results
+
+def run_swarm_challenge(
+    client: LLMClient,
+    conn,
+    findings: list[dict],
+    chunks: list[CodeChunk],
+    metrics: MetricsEngine,
+    num_challengers: int = 1,
+) -> list[dict]:
+    _EMIT("PHASE", "orchestrator", f"PHASE 4 — CHALLENGE: Adversarial peer review of {len(findings)} discovered findings with {num_challengers} challengers")
+    confirmed = []
+    for i, f in enumerate(findings):
+        _EMIT("CHALLENGER", "orchestrator", f"[{i+1}/{len(findings)}] Challenging: {f.get('message')}")
+        context_chunk = next((c for c in chunks if f["file"] in c.file_path), None)
+        content = context_chunk.content if context_chunk else ""
+        prompt = textwrap.dedent(f"""\
+            You are an adversarial reviewer. Is this finding a true positive?
+            Finding: {f.get('message')}
+            Location: {f.get('file')}:{f.get('line')}
+            
+            Code:
+            {content[:2000]}
+            
+            Reply with EXACTLY:
+            VERDICT: TRUE_POSITIVE or FALSE_POSITIVE
+            RATIONALE: <reason>
+        """)
+        
+        agent_verdicts = []
+        for c_idx in range(num_challengers):
+            try:
+                response = client.generate(prompt=prompt, temperature=0.1 + (0.1 * c_idx))
+                metrics.record_token_usage(len(prompt), len(response or ""))
+            except Exception:
+                agent_verdicts.append("INCONCLUSIVE")
+                continue
+                
+            if "FALSE_POSITIVE" in response:
+                agent_verdicts.append("FALSE_POSITIVE")
+            elif "TRUE_POSITIVE" in response:
+                agent_verdicts.append("TRUE_POSITIVE")
+            else:
+                agent_verdicts.append("INCONCLUSIVE")
+                
+        if any(v == "FALSE_POSITIVE" for v in agent_verdicts):
+            _EMIT("VERDICT", "challenger", f"Refuted: {f.get('message')}")
+            metrics.record_verdict("FP", f)
+        elif all(v == "TRUE_POSITIVE" for v in agent_verdicts) and agent_verdicts:
+            _EMIT("VERDICT", "challenger", f"Confirmed: {f.get('message')}")
+            metrics.record_verdict("TP", f)
+            f["triage_rationale"] = "Confirmed by all challengers"
+            confirmed.append(f)
+        else:
+            _EMIT("VERDICT", "challenger", f"Inconclusive: {f.get('message')}")
+            metrics.record_verdict("INCONCLUSIVE", f)
+            
+    return confirmed
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
@@ -388,6 +528,8 @@ def main():
     parser = argparse.ArgumentParser(description="Real-World Swarm Security Scanner")
     parser.add_argument("--repo", required=True,
                         help="Git repository URL or local path to scan")
+    parser.add_argument("--branch", default=None,
+                        help="Specific branch to scan for PRs")
     parser.add_argument("--model", default="llama3.2",
                         help="Ollama model for discovery agents")
     parser.add_argument("--challenger-model", default="qwen2.5-coder:7b",
@@ -425,11 +567,22 @@ def main():
     # ── Phase 0: Repository Ingestion ─────────────────────────────────────
     _EMIT("PHASE", "orchestrator", "PHASE 0 — INGEST: Cloning / walking repository")
     diff_filter = json.loads(args.diff_json) if args.diff_json else None
-    repo_map, chunks = ingest_repository(args.repo, clone_to=args.clone_to, diff_filter=diff_filter)
+    repo_map, chunks = ingest_repository(args.repo, clone_to=args.clone_to, diff_filter=diff_filter, branch=args.branch)
     _EMIT("SYSTEM", "ingester",
           f"Repo: {repo_map.repo_name} | Files: {repo_map.total_files} | "
           f"Chunks: {len(chunks)} | Frameworks: {repo_map.framework_signals} | "
           f"Tech: {repo_map.technology_inventory}")
+
+    try:
+        sys.path.append(str(Path(__file__).parent.parent))
+        from backend.database import save_architecture
+        from dataclasses import asdict
+        map_dict = asdict(repo_map)
+        map_dict.pop("files", None)
+        map_dict.pop("root", None)
+        save_architecture(args.repo, json.dumps(map_dict))
+    except Exception as e:
+        _EMIT("ERROR", "ingester", f"Failed to save architecture map: {e}")
 
     # ── Metrics engine setup ───────────────────────────────────────────────
     metrics = MetricsEngine(run_id=run_id, repo_name=repo_map.repo_name)
@@ -480,14 +633,32 @@ def main():
 
     triage_results = []
     if sast_findings:
-        triage_results = run_swarm_triage(client, conn, sast_findings, chunks, repo_map, metrics)
+        triage_results = run_swarm_triage(client, conn, sast_findings, chunks, repo_map, metrics, num_workers=args.workers)
         metrics.compute_sast_triage(triage_results)
     
-    # ── Phase 3: Challenge ─────────────────────────────────────────────────
-    _EMIT("PHASE", "orchestrator",
-          "PHASE 3 — CHALLENGE: Adversarial peer review of confirmed True Positives")
-    # For now, we rely on the multi-agent consensus in run_swarm_triage to simulate challenge
-    _EMIT("SYSTEM", "orchestrator", "Challenge implicitly handled via agent consensus.")
+    # ── Phase 3: Discovery ─────────────────────────────────────────────────
+    hallucination_pattern = build_dynamic_hallucination_pattern(repo_map.technology_inventory)
+    discovery_findings = run_swarm_discovery(
+        client, conn, chunks, repo_map, metrics, args.max_chunks, hallucination_pattern
+    )
+    
+    # ── Phase 4: Challenge ─────────────────────────────────────────────────
+    if discovery_findings:
+        confirmed_discovery = run_swarm_challenge(
+            challenger_client, conn, discovery_findings, chunks, metrics, num_challengers=args.challengers
+        )
+        # Format the confirmed discovery findings like triage results for metrics/output
+        for i, df in enumerate(confirmed_discovery):
+            triage_results.append({
+                "sast_finding": df,
+                "verdict": df["triage_verdict"],
+                "confidence": "HIGH",
+                "rationale": df["triage_rationale"],
+                "finding_idx": 1000 + i, # Offset to distinguish from SAST
+            })
+            _EMIT("VERDICT", "triage", f"[DISCOVERY {i+1}] Consensus: ✓ TP", finding=df, verdict="TP", rationale=df["triage_rationale"])
+    else:
+        _EMIT("SYSTEM", "orchestrator", "No novel flaws discovered to challenge.")
 
     # ── Phase 5: Metrics & Reporting ──────────────────────────────────────
     _EMIT("PHASE", "orchestrator", "PHASE 5 — METRICS: Computing real-world evaluation")

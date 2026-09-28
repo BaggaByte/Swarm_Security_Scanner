@@ -42,7 +42,7 @@ SECURITY_RELEVANT_EXTENSIONS = {
 
 # Directories to always skip
 SKIP_DIRS = {
-    ".git", ".github", "__pycache__", "node_modules", ".venv", "venv",
+    ".git", "__pycache__", "node_modules", ".venv", "venv",
     "env", ".env", "dist", "build", ".pytest_cache", ".mypy_cache",
     "*.egg-info", "vendor", "third_party", ".idea", ".vscode",
     "coverage", "htmlcov", ".tox",
@@ -208,7 +208,7 @@ def _validate_local_path(path_str: str):
         if not (real == real_root or real.startswith(real_root + os.sep)):
             raise PermissionError(f"Security error: path must be inside SWARM_ALLOWED_SCAN_ROOT: {real_root}")
 
-def clone_repo(url: str, target_dir: Optional[str] = None) -> str:
+def clone_repo(url: str, target_dir: Optional[str] = None, branch: Optional[str] = None) -> str:
     """
     Clone a Git repository. Returns the absolute path to the cloned directory.
     Falls back to shallow clone (--depth 1) for speed.
@@ -229,8 +229,13 @@ def clone_repo(url: str, target_dir: Optional[str] = None) -> str:
     print(f"  [INGEST] Cloning {url} → {target_dir}", flush=True)
     t0 = time.time()
 
+    cmd = ["git", "clone", "--depth", "1", "--single-branch"]
+    if branch:
+        cmd.extend(["--branch", branch])
+    cmd.extend([url, target_dir])
+
     result = subprocess.run(
-        ["git", "clone", "--depth", "1", "--single-branch", url, target_dir],
+        cmd,
         capture_output=True,
         text=True,
         timeout=120,
@@ -251,6 +256,8 @@ def clone_repo(url: str, target_dir: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 
 def _should_skip_dir(dir_name: str) -> bool:
+    if dir_name == ".github":
+        return False
     return dir_name in SKIP_DIRS or dir_name.startswith(".")
 
 
@@ -262,7 +269,7 @@ def walk_repo_files(root: str) -> Iterator[Path]:
         dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
         for fname in filenames:
             fpath = Path(dirpath) / fname
-            if fpath.suffix.lower() in SECURITY_RELEVANT_EXTENSIONS:
+            if fpath.suffix.lower() in SECURITY_RELEVANT_EXTENSIONS or fpath.name.lower() in {"makefile", "dockerfile", "caddyfile", "nginx.conf", ".dockerignore", ".gitignore", ".env"}:
                 if MIN_FILE_BYTES <= fpath.stat().st_size <= MAX_FILE_BYTES:
                     yield fpath
 
@@ -397,7 +404,7 @@ def chunk_file(file_entry: FileEntry) -> list[CodeChunk]:
 # Main ingest function
 # ---------------------------------------------------------------------------
 
-def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: Optional[dict[str, list[int]]] = None) -> tuple[RepoMap, list[CodeChunk]]:
+def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: Optional[dict[str, list[int]]] = None, branch: Optional[str] = None) -> tuple[RepoMap, list[CodeChunk]]:
     """
     Ingest a repository from a URL or local path.
 
@@ -411,7 +418,7 @@ def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: 
     # Step 1: Resolve to a local path
     is_remote = source.startswith(("http://", "https://", "git@"))
     if is_remote:
-        repo_root = clone_repo(source, clone_to)
+        repo_root = clone_repo(source, clone_to, branch)
         repo_name = source.rstrip("/").split("/")[-1].removesuffix(".git")
     else:
         repo_root = os.path.abspath(source)

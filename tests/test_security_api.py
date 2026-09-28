@@ -18,8 +18,8 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-# Add backend directory to sys.path for direct imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+# Add root directory to sys.path for direct imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Set test environment variables
 os.environ["SWARM_API_KEY"] = "test-secret-key-12345"
@@ -27,8 +27,8 @@ os.environ["SWARM_ALLOW_ANONYMOUS"] = "false"
 os.environ["GITHUB_WEBHOOK_SECRET"] = "webhook-test-secret"
 os.environ["SWARM_DB_PATH"] = ":memory:"
 
-from main import app
-from security import (
+from backend.main import app
+from backend.security import (
     validate_remote_git_url,
     validate_local_scan_path,
     validate_sandbox_target_url,
@@ -42,8 +42,8 @@ client = TestClient(app)
 # ---------------------------------------------------------------------------
 
 def test_health_check_unauthenticated():
-    """Health check endpoint '/' should be accessible without credentials."""
-    response = client.get("/")
+    """Health check endpoint '/api/health' should be accessible without credentials."""
+    response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
@@ -181,3 +181,102 @@ def test_sandbox_target_validation():
     with pytest.raises(Exception) as exc:
         validate_sandbox_target_url("http://attacker.com/steal")
     assert "403" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 6. Architecture Map Privacy & Attack Surface Graph Tests
+# ---------------------------------------------------------------------------
+
+def test_architecture_omits_root_and_files():
+    """Architecture map storage and API must never leak host root paths or source contents."""
+    from backend.database import save_architecture, get_architecture
+    import json
+
+    test_repo = "https://github.com/test-org/secure-app.git"
+    raw_payload = json.dumps({
+        "root": "C:\\Users\\admin\\sensitive\\source_code",
+        "repo_name": "secure-app",
+        "total_files": 42,
+        "total_lines": 3500,
+        "framework_signals": ["fastapi"],
+        "technology_inventory": ["sql", "subprocess", "jwt"],
+        "entry_points": ["backend/main.py"],
+        "files": [{"rel_path": "backend/main.py", "content": "SECRET_PASSWORD = 1234"}],
+    })
+
+    # Save to database
+    save_architecture(test_repo, raw_payload)
+
+    # Verify DB sanitization
+    db_stored = json.loads(get_architecture(test_repo))
+    assert "root" not in db_stored
+    assert "files" not in db_stored
+
+    # Verify API endpoint sanitization and attack surface graph
+    headers = {"X-API-Key": "test-secret-key-12345"}
+    resp = client.get(f"/api/architecture?repo={test_repo}", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert "raw" in data
+    assert "root" not in data["raw"]
+    assert "files" not in data["raw"]
+
+    node_ids = {n["id"] for n in data["nodes"]}
+    assert "ingress-client" in node_ids
+    assert "entry-0" in node_ids
+    assert "comp-core" in node_ids
+    assert "comp-auth" in node_ids
+    assert "store-sql" in node_ids
+    assert "sink-subprocess" in node_ids
+
+    # Verify flow connections
+    edge_pairs = {(e["source"], e["target"]) for e in data["edges"]}
+    assert ("ingress-client", "entry-0") in edge_pairs
+    assert ("entry-0", "comp-core") in edge_pairs
+    assert ("comp-core", "sink-subprocess") in edge_pairs
+
+
+# ---------------------------------------------------------------------------
+# 7. PR Diff Extractor Tests
+# ---------------------------------------------------------------------------
+
+def test_diff_extractor_ssrf_rejection():
+    """PR diff extraction must reject SSRF clone URLs targeting private networks."""
+    from backend.diff_extractor import extract_diff_from_pr
+
+    malicious_payload = {
+        "action": "opened",
+        "pull_request": {
+            "head": {
+                "ref": "feature",
+                "repo": {"clone_url": "http://169.254.169.254/latest/meta-data"}
+            },
+            "base": {
+                "ref": "main",
+                "repo": {"clone_url": "https://github.com/legit/repo.git"}
+            }
+        }
+    }
+    result = extract_diff_from_pr(malicious_payload)
+    assert result is None
+
+
+def test_parse_unified_diff():
+    """Parse unified diff properly extracts added/modified line numbers."""
+    from backend.diff_extractor import parse_unified_diff
+
+    sample_diff = """--- a/backend/main.py
++++ b/backend/main.py
+@@ -10,3 +10,4 @@
+ def existing():
++    added_line_one = 1
++    added_line_two = 2
+     pass
+"""
+    parsed = parse_unified_diff(sample_diff)
+    assert "backend/main.py" in parsed
+    assert 10 in parsed["backend/main.py"]
+    assert 11 in parsed["backend/main.py"]
+    assert 12 in parsed["backend/main.py"]
+

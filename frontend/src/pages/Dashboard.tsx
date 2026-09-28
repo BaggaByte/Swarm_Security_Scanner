@@ -111,7 +111,7 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
     { label: 'Confirmed', value: findings.filter(f => f.status === 'confirmed').length, color: '#fb923c' },
     { label: 'Fixed', value: findings.filter(f => f.status === 'fixed').length, color: '#34d399' },
     { label: 'Accepted', value: findings.filter(f => f.status === 'accepted_risk').length, color: '#fbbf24' },
-    { label: 'FP', value: findings.filter(f => f.status === 'false_positive').length, color: '#64748b' },
+    { label: 'FP', value: findings.filter(f => f.status === 'false_positive').length, color: 'var(--color-text-muted)' },
   ], [findings]);
 
   return (
@@ -137,16 +137,16 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
         />
         <KpiCard
           icon={<CheckCircle size={20} />}
-          label="Fixed This Week" value={fixedThisWeek.length}
+          label="Recently Fixed" value={fixedThisWeek.length}
           accent="#34d399"
           sub="Resolved findings"
           trend={fixedThisWeek.length > 0 ? { direction: 'down', label: 'Improving' } : undefined}
         />
         <KpiCard
           icon={<TrendingDown size={20} />}
-          label="FP Reduction" value={`${fpRate}%`}
+          label="False Positive Rate" value={`${fpRate}%`}
           accent="#a78bfa"
-          sub="AI-eliminated noise"
+          sub="AI-identified noise"
         />
         <KpiCard
           icon={<Activity size={20} />}
@@ -355,7 +355,7 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
 
 function EmptyChart({ label }: { label: string }) {
   return (
-    <div style={{ height: 150, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#334155', fontSize: 13, fontStyle: 'italic' }}>
+    <div style={{ height: 150, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text-muted)', fontSize: 13, fontStyle: 'italic' }}>
       {label}
     </div>
   );

@@ -32,27 +32,24 @@ RUN groupadd -g 1001 swarmgroup && \
 WORKDIR /app
 
 # Install Python backend dependencies
-COPY backend/requirements.txt* ./backend/
-RUN pip install --no-cache-dir \
-    fastapi>=0.100.0 \
-    uvicorn[standard]>=0.23.0 \
-    pydantic>=2.0.0 \
-    python-multipart \
-    docker \
-    httpx
+COPY backend/requirements.txt ./backend/
+RUN pip install --no-cache-dir -r backend/requirements.txt
 
 # Copy project files
 COPY --chown=swarmuser:swarmgroup backend/ ./backend/
 COPY --chown=swarmuser:swarmgroup cycle11_ollama_swarm/ ./cycle11_ollama_swarm/
 COPY --from=frontend-builder --chown=swarmuser:swarmgroup /app/frontend/dist ./frontend/dist
 
-# Switch to unprivileged user
-USER swarmuser:swarmgroup
+# Pre-create data directory with unprivileged ownership for SQLite persistence
+RUN mkdir -p /app/backend/data && chown -R swarmuser:swarmgroup /app
+
+# Run as unprivileged user
+USER swarmuser
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/ || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Launch production server with multiple uvicorn workers
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

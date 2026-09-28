@@ -23,6 +23,18 @@ if %errorlevel% neq 0 (
     echo.
 )
 
+REM ─── Load .env if present ───
+echo [1.5/3] Loading .env ...
+if exist "%~dp0.env" (
+    for /f "usebackq tokens=1,* eol=# delims==" %%a in ("%~dp0.env") do (
+        set "%%a=%%b"
+    )
+    echo  [OK]   Loaded .env
+) else (
+    echo  [INFO] No .env found.
+)
+echo.
+
 REM ─── Install Python deps if needed ───
 echo [2/3] Checking Python dependencies...
 pip show fastapi uvicorn >nul 2>&1
@@ -35,7 +47,7 @@ echo.
 
 REM ─── Launch Backend ───
 echo [3/3] Starting FastAPI backend on http://localhost:8000 ...
-start "Swarm-Backend" /MIN cmd /c "cd /d %~dp0backend && python -m uvicorn main:app --reload --port 8000 --log-level info"
+start "Swarm-Backend" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn backend.main:app --reload --port 8000 --log-level info"
 
 timeout /t 2 >nul
 

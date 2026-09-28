@@ -13,12 +13,16 @@ services:
       - SWARM_API_KEY=${SWARM_API_KEY}
       - SWARM_ALLOW_ANONYMOUS=false
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OLLAMA_URL=http://ollama:11434
       - SWARM_MAX_CONCURRENT_SCANS=3
-      - SWARM_SANDBOX_NETWORK=swarm-internal
+      - SWARM_SANDBOX_NETWORK=sandbox-net
       - SWARM_ALLOWED_SANDBOX_TARGETS=http://sandbox-target:5000
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
     volumes:
       - swarm_data:/app/backend/data
-      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - docker-socket-proxy
     security_opt:
       - no-new-privileges:true
     deploy:
@@ -29,12 +33,42 @@ services:
     networks:
       - swarm-internal
 
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+      DELETE: 1
+    networks:
+      - swarm-internal
+    security_opt:
+      - no-new-privileges:true
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - swarm-internal
+
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: antigravity-sandbox:latest
+    command: ["true"]
+
   sandbox-target:
     image: python:3.11-alpine
     restart: "no"
     command: ["python", "-m", "http.server", "5000"]
     networks:
-      - swarm-internal
+      - sandbox-net
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -46,7 +80,11 @@ services:
 
 volumes:
   swarm_data:
+  ollama_data:
 
 networks:
   swarm-internal:
-    internal: true # Disallow external internet routing for internal test traffic
+    driver: bridge
+  sandbox-net:
+    driver: bridge
+    internal: true

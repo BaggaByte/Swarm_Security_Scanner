@@ -151,7 +151,7 @@ The Swarm Security Scanner implements Defense-in-Depth AppSec controls across 5 
 | **API Authentication** | `backend/security.py` | Bearer token / `X-API-Key` / query token for SSE. Rejects anonymous access in production. |
 | **Boundary & Path Traversal** | `backend/security.py` | Canonical `realpath` resolution, system root blocking (`/etc`, `/proc`, `C:\Windows`), `SWARM_ALLOWED_SCAN_ROOT` jail. |
 | **SSRF Prevention** | `backend/security.py` | HTTPS scheme enforcement, DNS resolution check, blocks loopback, link-local, RFC-1918 private IPs, and cloud metadata (`169.254.169.254`). |
-| **Exploit Sandbox Isolation** | `backend/sandbox_runner.py` | Docker container runs with `network_mode="none"`, `read_only=True`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, strict memory/CPU/PID limits, and unprivileged user (`UID 1000`). |
+| **Exploit Sandbox Isolation** | `backend/sandbox_runner.py` | Docker container runs with `network_mode="none"`, `read_only=True`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, strict memory/CPU/PID limits, and unprivileged user (`UID 1000`). API runs as an unprivileged user and safely orchestrates containers via a TCP `docker-socket-proxy`. |
 | **Webhook Verification** | `backend/main.py` | Mandatory HMAC-SHA256 signature verification (`X-Hub-Signature-256`), rejects unsigned or invalid payloads. |
 | **Durable Persistence** | `backend/database.py` | SQLite backing store preserves scan runs, audit logs, and human feedback across service restarts. |
 | **Automated CI/CD** | `.github/workflows/ci.yml` | GitHub Actions pipeline running linting, type checks, and full security test suite on all PRs. |

@@ -9,7 +9,7 @@ import urllib.request
 import urllib.error
 from typing import Optional
 
-OLLAMA_BASE = "http://127.0.0.1:11434"
+OLLAMA_BASE = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 

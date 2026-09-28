@@ -33,7 +33,7 @@ function RunRow({ run }: { run: ScanRun }) {
 
   return (
     <>
-      <tr className="scan-run-row" onClick={() => setExpanded(v => !v)}>
+      <tr className="scan-run-row" onClick={() => setExpanded(v => !v)} tabIndex={0} onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setExpanded(v => !v))}>
         <td>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#64748b', fontSize: 12 }}>
             {run.type === 'repo'
@@ -124,7 +124,7 @@ export default function ScanHistoryPage({ scanRuns, onNavigate }: ScanHistoryPag
       </div>
 
       {/* Aggregate summary */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 24 }}>
+      <div className="kpi-grid">
         {[
           { label: 'Total Scans', value: scanRuns.length, accent: '#38bdf8', icon: <BarChart2 size={18} /> },
           { label: 'Total Confirmed', value: totalConfirmed, accent: '#fb923c', icon: <CheckCircle2 size={18} /> },

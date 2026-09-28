@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Optional, List
 
@@ -29,13 +30,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Security & DB modules
-from security import (
+from .security import (
     require_api_key,
     validate_scan_target,
     validate_sandbox_target_url,
     verify_github_webhook_signature,
 )
-import database as db
+from . import database as db
 
 # ---------------------------------------------------------------------------
 # Concurrency & State Management
@@ -72,6 +73,7 @@ _runs_lock = threading.Lock()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    db.mark_interrupted_runs()
     yield
     with _runs_lock:
         for state in _runs.values():
@@ -129,9 +131,6 @@ class RepoScanRequest(BaseModel):
     max_chunks: int = Field(default=20, ge=5, le=100)
     sarif_file: Optional[str] = Field(default=None, description="Path to a SARIF file to ingest")
 
-class SteerRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
-
 class FeedbackRequest(BaseModel):
     finding_idx: int
     human_verdict: str
@@ -178,6 +177,10 @@ async def _run_swarm(run_id: str, req: ScanRequest, loop: asyncio.AbstractEventL
         "--challengers", str(req.challengers),
     ]
 
+    ollama_url = os.environ.get("OLLAMA_URL")
+    if ollama_url:
+        cmd.extend(["--url", ollama_url])
+
     def _reader():
         try:
             process = subprocess.Popen(
@@ -190,6 +193,7 @@ async def _run_swarm(run_id: str, req: ScanRequest, loop: asyncio.AbstractEventL
                 encoding="utf-8",
                 errors="replace",
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                start_new_session=True if sys.platform != "win32" else False,
             )
             state.process = process
 
@@ -202,10 +206,10 @@ async def _run_swarm(run_id: str, req: ScanRequest, loop: asyncio.AbstractEventL
                 if not line.startswith("{"):
                     line = json.dumps({"type": "SYSTEM", "agent": "runner", "content": line})
                 
-                # Parse for DB persistence
+                # Preserve original structured JSON
                 try:
                     payload = json.loads(line)
-                    db.append_log(run_id, payload.get("type", "SYSTEM"), payload.get("agent", "runner"), payload.get("content", line))
+                    db.append_log(run_id, payload.get("type", "SYSTEM"), payload.get("agent", "runner"), line)
                 except Exception:
                     db.append_log(run_id, "SYSTEM", "runner", line)
 
@@ -220,7 +224,7 @@ async def _run_swarm(run_id: str, req: ScanRequest, loop: asyncio.AbstractEventL
                 "content": f"Swarm finished — exit code {exit_code}",
                 "exit_code": exit_code,
             })
-            db.append_log(run_id, "DONE", "runner", f"Swarm finished — exit code {exit_code}")
+            db.append_log(run_id, "DONE", "runner", done_payload)
             db.update_run_status(run_id, "done" if exit_code == 0 else "error", exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
             state.status = "done" if exit_code == 0 else "error"
@@ -257,12 +261,20 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
         "--max-chunks", str(req.max_chunks),
     ]
     if req.sarif_file:
-        cmd.extend(["--sarif-file", req.sarif_file])
+        safe_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "uploads"))
+        sarif_path = os.path.abspath(req.sarif_file)
+        if not sarif_path.startswith(safe_dir) or not sarif_path.endswith(".sarif"):
+            raise HTTPException(status_code=400, detail="sarif_file must be a .sarif file inside the uploads directory")
+        cmd.extend(["--sarif-file", sarif_path])
     
     if req.no_sast:
         cmd.append("--no-sast")
     elif req.sast_tools:
         cmd += ["--sast"] + req.sast_tools
+
+    ollama_url = os.environ.get("OLLAMA_URL")
+    if ollama_url:
+        cmd.extend(["--url", ollama_url])
 
     def _reader():
         try:
@@ -276,6 +288,7 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
                 encoding="utf-8",
                 errors="replace",
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                start_new_session=True if sys.platform != "win32" else False,
             )
             state.process = process
 
@@ -290,7 +303,7 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
                 
                 try:
                     payload = json.loads(line)
-                    db.append_log(run_id, payload.get("type", "SYSTEM"), payload.get("agent", "runner"), payload.get("content", line))
+                    db.append_log(run_id, payload.get("type", "SYSTEM"), payload.get("agent", "runner"), line)
                 except Exception:
                     db.append_log(run_id, "SYSTEM", "runner", line)
 
@@ -304,7 +317,7 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
                 "content": f"Real-world scan finished — exit code {exit_code}",
                 "exit_code": exit_code,
             })
-            db.append_log(run_id, "DONE", "runner", f"Real-world scan finished — exit code {exit_code}")
+            db.append_log(run_id, "DONE", "runner", done_payload)
             db.update_run_status(run_id, "done" if exit_code == 0 else "error", exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
             state.status = "done" if exit_code == 0 else "error"
@@ -322,10 +335,15 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
 # API Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/")
+@app.get("/api/health")
 def health():
     """Unauthenticated health check for load balancers."""
     return {"status": "ok", "message": "Swarm API is running"}
+
+@app.get("/api/health/auth", dependencies=[Security(require_api_key)])
+def health_auth():
+    """Authenticated health check for connection testing."""
+    return {"status": "ok", "message": "Authenticated"}
 
 
 @app.post("/api/scan", dependencies=[Security(require_api_key)])
@@ -338,7 +356,7 @@ async def start_scan(request: ScanRequest):
             detail=f"Maximum concurrent scans ({MAX_CONCURRENT_SCANS}) reached. Please wait for an existing scan to finish.",
         )
 
-    run_id = str(int(time.time() * 1000))
+    run_id = str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     config = {
         "cycle": request.cycle,
@@ -368,7 +386,7 @@ async def start_repo_scan(request: RepoScanRequest):
             detail=f"Maximum concurrent scans ({MAX_CONCURRENT_SCANS}) reached. Please wait for an existing scan to finish.",
         )
 
-    run_id = str(int(time.time() * 1000))
+    run_id = str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     config = {
         "scan_type": "real_world",
@@ -411,30 +429,52 @@ def get_run(run_id: str):
 
 async def _event_stream(run_id: str) -> AsyncGenerator[str, None]:
     state = _runs.get(run_id)
+    seen = set()
+    
+    # Always replay from DB first to prevent lost logs on reconnect
+    logs = db.get_logs_for_run(run_id)
+    for entry in logs:
+        line = entry['content']
+        seen.add(line)
+        yield f"data: {line}\n\n"
+        
     if not state:
         # Check if completed run exists in DB
         db_run = db.get_run(run_id)
-        if db_run:
-            logs = db.get_logs_for_run(run_id)
-            for entry in logs:
-                yield f"data: {json.dumps(entry)}\n\n"
-            return
-        payload = json.dumps({"type": "ERROR", "agent": "server", "content": f"Run {run_id} not found"})
-        yield f"data: {payload}\n\n"
+        if not db_run:
+            payload = json.dumps({"type": "ERROR", "agent": "server", "content": f"Run {run_id} not found"})
+            yield f"data: {payload}\n\n"
+        elif db_run['status'] in ('done', 'error'):
+            # Tell client to close so it doesn't reconnect
+            payload = json.dumps({"type": "DONE", "agent": "server", "content": "Replay finished"})
+            yield f"data: {payload}\n\n"
         return
 
     while True:
         try:
-            line = await asyncio.wait_for(state.queue.get(), timeout=30.0)
+            line = await asyncio.wait_for(state.queue.get(), timeout=2.0)
+            if line is None:  # Sentinel
+                break
         except asyncio.TimeoutError:
+            if state.status != "running":
+                break
             yield ": keepalive\n\n"
             continue
 
-        yield f"data: {line}\n\n"
+        if line not in seen:
+            seen.add(line)
+            yield f"data: {line}\n\n"
 
-        parsed = json.loads(line)
-        if parsed.get("type") in ("DONE", "ERROR"):
-            break
+        try:
+            parsed = json.loads(line)
+            if parsed.get("type") in ("DONE", "ERROR"):
+                break
+        except Exception:
+            pass
+
+    # Ensure the client always gets a terminal event to stop reconnecting
+    payload = json.dumps({"type": "DONE", "agent": "server", "content": "Stream closed"})
+    yield f"data: {payload}\n\n"
 
 
 @app.get("/api/scan/{run_id}/stream", dependencies=[Security(require_api_key)])
@@ -447,24 +487,6 @@ async def stream_scan(run_id: str):
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.post("/api/scan/{run_id}/steer", dependencies=[Security(require_api_key)])
-async def steer_scan(run_id: str, body: SteerRequest):
-    state = _runs.get(run_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="Run not found")
-    if state.status != "running":
-        raise HTTPException(status_code=409, detail="Run is not active")
-
-    steer_payload = json.dumps({
-        "type": "SYSTEM",
-        "agent": "human",
-        "content": f"[STEER] {body.prompt}",
-    })
-    db.append_log(run_id, "SYSTEM", "human", f"[STEER] {body.prompt}")
-    await state.queue.put(steer_payload)
-    return {"status": "injected", "run_id": run_id}
 
 
 @app.post("/api/scan/{run_id}/feedback", dependencies=[Security(require_api_key)])
@@ -500,7 +522,7 @@ async def generate_remediation(req: RemediateRequest):
     
     import urllib.request
     req_obj = urllib.request.Request(
-        "http://127.0.0.1:11434/api/generate",
+        f"{os.environ.get('OLLAMA_URL', 'http://127.0.0.1:11434')}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST"
@@ -560,7 +582,7 @@ async def verify_exploitability(req: VerifyRequest):
     
     import urllib.request
     req_obj = urllib.request.Request(
-        "http://127.0.0.1:11434/api/generate",
+        f"{os.environ.get('OLLAMA_URL', 'http://127.0.0.1:11434')}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST"
@@ -580,7 +602,7 @@ async def verify_exploitability(req: VerifyRequest):
                 if exploit_code.startswith("python"):
                     exploit_code = exploit_code[6:].strip()
         
-        from sandbox_runner import run_exploit_in_sandbox
+        from .sandbox_runner import run_exploit_in_sandbox
         
         def run_sandbox_sync():
             return run_exploit_in_sandbox(
@@ -599,6 +621,255 @@ async def verify_exploitability(req: VerifyRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def build_attack_surface_graph(repo_map: dict, repo_url: str):
+    """
+    Constructs a directional Attack Surface & Component Architecture graph
+    from repo analysis metadata, mapping external ingress, routing components,
+    internal domain modules, persistence, egress, and dangerous execution sinks.
+    """
+    nodes = []
+    edges = []
+
+    # 1. External Ingress / Untrusted Traffic Boundary
+    nodes.append({
+        "id": "ingress-client",
+        "position": {"x": 50, "y": 200},
+        "data": {
+            "label": "Public Traffic / Untrusted Ingress",
+            "type": "external",
+            "icon": "Globe",
+            "tags": ["External-Surface", "Untrusted-Input"],
+        }
+    })
+
+    # 2. Entry points & Web Ingress Routers
+    entry_points = repo_map.get("entry_points", [])
+    frameworks = repo_map.get("framework_signals", [])
+    technologies = set(repo_map.get("technology_inventory", []))
+    cross_refs = repo_map.get("cross_references", {})
+
+    entry_node_ids = []
+    if entry_points:
+        for idx, ep in enumerate(entry_points[:3]):
+            node_id = f"entry-{idx}"
+            entry_node_ids.append(node_id)
+            fw_label = f" ({frameworks[0].upper()})" if frameworks else ""
+            nodes.append({
+                "id": node_id,
+                "position": {"x": 300, "y": 100 + idx * 140},
+                "data": {
+                    "label": f"{ep}{fw_label}",
+                    "type": "entrypoint",
+                    "icon": "Network",
+                    "tags": ["Internet-Facing", "Router", "HTTP-Ingress"],
+                }
+            })
+            edges.append({
+                "id": f"e-ingress-{node_id}",
+                "source": "ingress-client",
+                "target": node_id,
+                "animated": True,
+            })
+    else:
+        node_id = "entry-main"
+        entry_node_ids.append(node_id)
+        label = f"{frameworks[0].upper()} Router" if frameworks else f"{repo_map.get('repo_name', 'App')} Gateway"
+        nodes.append({
+            "id": node_id,
+            "position": {"x": 300, "y": 200},
+            "data": {
+                "label": label,
+                "type": "entrypoint",
+                "icon": "Network",
+                "tags": ["Internet-Facing", "HTTP-Ingress"],
+            }
+        })
+        edges.append({
+            "id": f"e-ingress-{node_id}",
+            "source": "ingress-client",
+            "target": node_id,
+            "animated": True,
+        })
+
+    # 3. Internal Application Components & Domain Modules
+    has_auth = "jwt" in technologies or "crypto" in technologies or any("auth" in k.lower() or "user" in k.lower() for k in cross_refs)
+    if has_auth:
+        nodes.append({
+            "id": "comp-auth",
+            "position": {"x": 600, "y": 80},
+            "data": {
+                "label": "Auth & Identity Boundary",
+                "type": "internal",
+                "icon": "Lock",
+                "tags": ["Auth-Boundary", "Token-Verification"],
+            }
+        })
+        for eid in entry_node_ids:
+            edges.append({
+                "id": f"e-{eid}-auth",
+                "source": eid,
+                "target": "comp-auth",
+                "animated": False,
+            })
+
+    nodes.append({
+        "id": "comp-core",
+        "position": {"x": 600, "y": 230},
+        "data": {
+            "label": f"{repo_map.get('repo_name', 'Application')} Core Logic",
+            "type": "internal",
+            "icon": "Network",
+            "tags": ["Business-Logic", "Data-Flow"],
+        }
+    })
+    for eid in entry_node_ids:
+        edges.append({
+            "id": f"e-{eid}-core",
+            "source": eid,
+            "target": "comp-core",
+            "animated": True,
+        })
+
+    if "file_io" in technologies:
+        nodes.append({
+            "id": "comp-files",
+            "position": {"x": 600, "y": 380},
+            "data": {
+                "label": "File I/O & Storage Controller",
+                "type": "internal",
+                "icon": "Database",
+                "tags": ["Filesystem-Access", "Path-Surface"],
+            }
+        })
+        edges.append({
+            "id": "e-core-files",
+            "source": "comp-core",
+            "target": "comp-files",
+            "animated": False,
+        })
+
+    # 4. Storage, Sinks & Egress Layer
+    col3_y = 60
+    if "sql" in technologies:
+        nodes.append({
+            "id": "store-sql",
+            "position": {"x": 920, "y": col3_y},
+            "data": {
+                "label": "Relational DB / SQL Store",
+                "type": "database",
+                "icon": "Database",
+                "tags": ["Persistence", "SQL-Injection-Surface"],
+            }
+        })
+        edges.append({
+            "id": "e-core-sql",
+            "source": "comp-core",
+            "target": "store-sql",
+            "animated": False,
+        })
+        col3_y += 120
+
+    if "redis" in technologies:
+        nodes.append({
+            "id": "store-redis",
+            "position": {"x": 920, "y": col3_y},
+            "data": {
+                "label": "Redis Cache & Session Store",
+                "type": "database",
+                "icon": "Database",
+                "tags": ["In-Memory", "Session-Store"],
+            }
+        })
+        target_src = "comp-auth" if has_auth else "comp-core"
+        edges.append({
+            "id": f"e-{target_src}-redis",
+            "source": target_src,
+            "target": "store-redis",
+            "animated": False,
+        })
+        col3_y += 120
+
+    if "network" in technologies or "aws" in technologies:
+        nodes.append({
+            "id": "egress-network",
+            "position": {"x": 920, "y": col3_y},
+            "data": {
+                "label": "External APIs & Cloud Services",
+                "type": "external",
+                "icon": "Globe",
+                "tags": ["Egress", "SSRF-Surface"],
+            }
+        })
+        edges.append({
+            "id": "e-core-network",
+            "source": "comp-core",
+            "target": "egress-network",
+            "animated": False,
+        })
+        col3_y += 120
+
+    if "subprocess" in technologies:
+        nodes.append({
+            "id": "sink-subprocess",
+            "position": {"x": 920, "y": col3_y},
+            "data": {
+                "label": "OS Command Execution Sink",
+                "type": "internal",
+                "icon": "ShieldAlert",
+                "isHighRisk": True,
+                "tags": ["High-Risk", "RCE-Surface", "Subprocess"],
+            }
+        })
+        edges.append({
+            "id": "e-core-subprocess",
+            "source": "comp-core",
+            "target": "sink-subprocess",
+            "animated": True,
+        })
+        col3_y += 120
+
+    if "deserialization" in technologies:
+        nodes.append({
+            "id": "sink-deser",
+            "position": {"x": 920, "y": col3_y},
+            "data": {
+                "label": "Object Deserialization Sink",
+                "type": "internal",
+                "icon": "ShieldAlert",
+                "isHighRisk": True,
+                "tags": ["High-Risk", "Insecure-Deserialization", "RCE-Risk"],
+            }
+        })
+        edges.append({
+            "id": "e-core-deser",
+            "source": "comp-core",
+            "target": "sink-deser",
+            "animated": True,
+        })
+
+    return nodes, edges
+
+
+@app.get("/api/architecture", dependencies=[Security(require_api_key)])
+def get_architecture_map(repo: str):
+    """Fetch architecture map and attack surface graph for a repository."""
+    map_json = db.get_architecture(repo)
+    if not map_json:
+        raise HTTPException(status_code=404, detail="Architecture map not found for this repository. Run a scan first.")
+    
+    try:
+        repo_map = json.loads(map_json)
+        # Ensure sensitive local host paths or source code contents are never exposed in API DTO
+        repo_map.pop("root", None)
+        repo_map.pop("files", None)
+        
+        nodes, edges = build_attack_surface_graph(repo_map, repo)
+        return {"nodes": nodes, "edges": edges, "raw": repo_map}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/api/webhooks/github")
@@ -623,14 +894,17 @@ async def github_webhook(
     print(f"[Webhook] Verified GitHub webhook for {repo_name} - action: {action}")
     
     if "pull_request" in payload and action in ("opened", "synchronize", "reopened"):
-        clone_url = repo_data.get("clone_url") or repo_data.get("html_url")
-        if not clone_url:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Repository clone_url is missing from payload.")
+        pr = payload.get("pull_request", {})
+        head_clone_url = pr.get("head", {}).get("repo", {}).get("clone_url")
+        head_ref = pr.get("head", {}).get("ref")
+        
+        if not head_clone_url or not head_ref:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing PR head clone_url or ref in payload.")
         
         # Validate clone_url against SSRF
-        validated_clone_url = validate_scan_target(clone_url)
+        validated_clone_url = validate_scan_target(head_clone_url)
 
-        from diff_extractor import extract_diff_from_pr
+        from .diff_extractor import extract_diff_from_pr
         diff = extract_diff_from_pr(payload)
         if diff:
             print(f"[Webhook] Differential changes detected: {len(diff)} files modified.")
@@ -639,10 +913,42 @@ async def github_webhook(
             cmd = [
                 sys.executable, script_path,
                 "--repo", validated_clone_url,
+                "--branch", head_ref,
                 "--diff-json", diff_json_str,
             ]
-            background_tasks.add_task(subprocess.run, cmd)
+            def run_webhook_scan():
+                run_id = str(uuid.uuid4())
+                db.create_run(run_id, "webhook", {"repo": validated_clone_url})
+                db.append_log(run_id, "SYSTEM", "webhook", f"Starting webhook scan for {repo_name}")
+                try:
+                    res = subprocess.run(cmd, timeout=600, capture_output=True, text=True)
+                    db.update_run_status(run_id, "done" if res.returncode == 0 else "error", res.returncode)
+                except subprocess.TimeoutExpired:
+                    db.append_log(run_id, "ERROR", "webhook", "Timeout expired")
+                    db.update_run_status(run_id, "error", -1)
+                except Exception as e:
+                    db.append_log(run_id, "ERROR", "webhook", str(e))
+                    db.update_run_status(run_id, "error", -1)
+            background_tasks.add_task(run_webhook_scan)
         else:
             print("[Webhook] No differential code changes extracted.")
     
     return {"status": "ok", "message": f"Webhook processed for {repo_name}"}
+
+# Serve the frontend
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        safe_base = os.path.abspath(frontend_dist)
+        path = os.path.abspath(os.path.join(safe_base, full_path))
+        if not path.startswith(safe_base):
+            return FileResponse(os.path.join(safe_base, "index.html"))
+        if os.path.isfile(path):
+            return FileResponse(path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))

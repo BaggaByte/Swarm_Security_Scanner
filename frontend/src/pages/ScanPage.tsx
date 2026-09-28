@@ -14,15 +14,16 @@ import {
   BackgroundVariant,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Play, TerminalSquare, Share2, Brain } from 'lucide-react';
+import { Play, TerminalSquare, Share2, Brain, Settings, ChevronDown, ChevronRight } from 'lucide-react';
 import type {
   LogEntry, LogType, SandboxScanConfig, RepoScanConfig,
   TriageFinding, Finding, ScanRun, Repository,
 } from '../types';
+import { useStore } from '../useStore';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const API = 'http://localhost:8000';
+const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
 
 const LOG_TYPE_ICON: Record<LogType, string> = {
   PHASE: '⬡', WORKER: '◈', CHALLENGER: '⚔', VERDICT: '◎',
@@ -32,8 +33,8 @@ const LOG_TYPE_ICON: Record<LogType, string> = {
 const CYCLE_OPTIONS = ['11', '13a', '13b', '14', '15', '16', '17', '18', '19', '20', '21', '22'];
 
 const DEFAULT_SANDBOX: SandboxScanConfig = {
-  model: 'groq/llama-3.1-8b-instant',
-  challengerModel: 'groq/llama-3.1-8b-instant',
+  model: 'llama3.2',
+  challengerModel: 'qwen2.5-coder:7b',
   cycle: '22',
   workers: 5,
   challengers: 2,
@@ -41,8 +42,8 @@ const DEFAULT_SANDBOX: SandboxScanConfig = {
 
 const DEFAULT_REPO: RepoScanConfig = {
   repo: '',
-  model: 'groq/llama-3.1-8b-instant',
-  challengerModel: 'groq/llama-3.1-8b-instant',
+  model: 'llama3.2',
+  challengerModel: 'qwen2.5-coder:7b',
   workers: 5,
   challengers: 2,
   sastTools: ['bandit', 'semgrep'],
@@ -58,27 +59,31 @@ const SEV_COLORS: Record<string, string> = {
 
 function nodeStyle(accent: string) {
   return {
-    background: 'rgba(13,23,38,0.85)',
-    border: `1.5px solid ${accent}55`,
-    borderRadius: '10px',
-    color: '#e2e8f0',
+    background: 'rgba(13,23,38,0.65)',
+    backdropFilter: 'blur(12px)',
+    WebkitBackdropFilter: 'blur(12px)',
+    border: `1px solid ${accent}66`,
+    borderRadius: '12px',
+    color: '#f8fafc',
     fontFamily: 'Inter, sans-serif',
-    fontSize: '11px',
-    fontWeight: 500,
-    padding: '8px 14px',
-    boxShadow: `0 0 12px ${accent}22`,
-    minWidth: 120,
+    fontSize: '12px',
+    fontWeight: 600,
+    padding: '10px 16px',
+    boxShadow: `0 8px 24px rgba(0,0,0,0.2), 0 0 16px ${accent}22`,
+    minWidth: 130,
     textAlign: 'center' as const,
+    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
   };
 }
 
 function activeNodeStyle(accent: string) {
   return {
     ...nodeStyle(accent),
+    background: 'rgba(13,23,38,0.85)',
     border: `1.5px solid ${accent}`,
-    boxShadow: `0 0 20px ${accent}55, 0 0 40px ${accent}22`,
-    transform: 'scale(1.04)',
-    transition: 'all 0.3s ease',
+    boxShadow: `0 8px 32px rgba(0,0,0,0.3), 0 0 24px ${accent}66`,
+    transform: 'scale(1.05)',
+    color: '#ffffff',
   };
 }
 
@@ -112,7 +117,7 @@ function parseLine(raw: string): LogEntry | null {
   if (!line || line.startsWith(':')) return null;
   try {
     const obj = JSON.parse(line);
-    return { id: Date.now() + Math.random(), type: (obj.type || 'SYSTEM') as LogType, agent: obj.agent || 'system', content: obj.content || line, ts: Date.now() };
+    return { id: Date.now() + Math.random(), type: (obj.type || 'SYSTEM') as LogType, agent: obj.agent || 'system', content: obj.content || line, ts: Date.now(), finding: obj.finding, verdict: obj.verdict, rationale: obj.rationale, metrics: obj.metrics };
   } catch {
     return { id: Date.now() + Math.random(), type: 'SYSTEM', agent: 'runner', content: line, ts: Date.now() };
   }
@@ -124,28 +129,23 @@ function extractFindings(logs: LogEntry[], scanId: string, repo: string): Findin
   const results: Finding[] = [];
   for (const log of logs) {
     if (log.type === 'VERDICT' && log.agent === 'triage') {
-      const triage = log.content.includes('→ ✓ TP') || log.content.includes('Consensus: ✓ TP') ? 'TP'
-        : log.content.includes('→ ✗ FP') || log.content.includes('Consensus: ✗ FP') ? 'FP'
-        : log.content.includes('⋯ INCONCLUSIVE') ? 'INCONCLUSIVE' : 'PENDING';
-      const fileMatch = log.content.match(/\]\s+(.+?):(\d+)\s+\[/);
-      const sevMatch = log.content.match(/\[([A-Z]+)\]/);
-      const rationaleMatch = log.content.match(/—\s+(.+)$/);
-      if (fileMatch) {
+      if (log.finding) {
         results.push({
-          id: `${scanId}-${fileMatch[1]}-${fileMatch[2]}-${Math.random()}`,
+          id: `${scanId}-${log.finding.id || Math.random()}`,
           repository: repo || 'sandbox',
-          file: fileMatch[1],
-          line: parseInt(fileMatch[2]),
-          title: `${triage === 'TP' ? 'Vulnerability' : 'Alert'} in ${fileMatch[1].split('/').pop()}`,
-          description: rationaleMatch?.[1] || log.content,
-          severity: (sevMatch?.[1] || 'MEDIUM') as Finding['severity'],
+          file: log.finding.file || 'Unknown',
+          line: log.finding.line || 0,
+          title: log.finding.message || 'Finding',
+          description: log.rationale || log.content,
+          severity: log.finding.severity || 'MEDIUM',
           cwe: null,
           owasp: null,
-          status: triage === 'FP' ? 'false_positive' : 'new',
-          aiVerdict: triage as Finding['aiVerdict'],
-          swarmRationale: rationaleMatch?.[1] || '',
-          tool: 'sast',
-          ruleId: '',
+          status: log.verdict === 'FP' ? 'false_positive' : 'new',
+          aiVerdict: ['TP', 'FP', 'INCONCLUSIVE', 'PENDING'].includes(log.verdict as string) ? (log.verdict as any) : 'PENDING',
+          swarmRationale: log.rationale || '',
+          codeSnippet: log.finding.code || log.finding.snippet || undefined,
+          tool: log.finding.tool || 'sast',
+          ruleId: log.finding.rule_id || '',
           firstDetected: Date.now(),
           lastDetected: Date.now(),
           scanId,
@@ -185,6 +185,7 @@ interface ScanPageProps {
 
 export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved, onRepoAdded }: ScanPageProps) {
   const [scanMode, setScanMode] = useState<'sandbox' | 'repo'>(preloadRepo ? 'repo' : 'sandbox');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [sandboxConfig, setSandboxConfig] = useState<SandboxScanConfig>(DEFAULT_SANDBOX);
   const [repoConfig, setRepoConfig] = useState<RepoScanConfig>({ ...DEFAULT_REPO, repo: preloadRepo || '' });
 
@@ -192,8 +193,39 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'graph' | 'logs' | 'triage'>('graph');
-  const [steerInput, setSteerInput] = useState('');
-  const [showSteer, setShowSteer] = useState(false);
+  const [scanStartTime, setScanStartTime] = useState<number | null>(null);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [streamStatus, setStreamStatus] = useState<'idle' | 'connected' | 'error'>('idle');
+  const { apiKey } = useStore();
+
+  useEffect(() => {
+    let interval: number;
+    if (running && scanStartTime) {
+      interval = window.setInterval(() => {
+        setElapsedTime(Math.floor((Date.now() - scanStartTime) / 1000));
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [running, scanStartTime]);
+
+  useEffect(() => {
+    if (!apiKey) return;
+    fetch(`${API}/api/scan/active`, { headers: { 'Authorization': `Bearer ${apiKey}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.length > 0) {
+          const active = data.find((r: any) => r.status === 'running');
+          if (active) {
+            setRunId(active.run_id);
+            setRunning(true);
+            setScanStartTime(active.started_at ? new Date(active.started_at).getTime() : Date.now());
+            // Wait a tick for ref/state to settle before subscribing
+            setTimeout(() => subscribeToRunDep(active.run_id, active.scan_type === 'real_world' ? active.repo : 'sandbox'), 100);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [apiKey]);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -213,8 +245,11 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
   const subscribeToRun = useCallback((id: string, repo: string) => {
     if (esRef.current) esRef.current.close();
-    const es = new EventSource(`${API}/api/scan/${id}/stream`);
+    const es = new EventSource(`${API}/api/scan/${id}/stream?token=${encodeURIComponent(apiKey)}`);
     esRef.current = es;
+
+    es.onopen = () => setStreamStatus('connected');
+    es.onerror = () => setStreamStatus('error');
 
     es.onmessage = (event) => {
       const entry = parseLine(event.data);
@@ -245,6 +280,7 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
       if (entry.type === 'DONE' || entry.type === 'ERROR') {
         es.close();
         setRunning(false);
+        setStreamStatus('idle');
         // extract and save findings
         setLogs(prev => {
           const allLogs = [...prev, entry];
@@ -296,14 +332,22 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
       }
     };
 
-    es.onerror = () => { es.close(); setRunning(false); };
+    es.onerror = () => { 
+      // Do not close immediately; let EventSource attempt to reconnect
+      console.warn("EventSource disconnected or errored, attempting to reconnect...");
+    };
   }, [sandboxConfig, repoConfig, scanMode, onFindingsFound, onScanRunSaved, onRepoAdded, setNodes]);
+
+  const subscribeToRunDep = useCallback(subscribeToRun, [apiKey, setNodes, setRunning, setLogs, onFindingsFound, onScanRunSaved, onRepoAdded]);
 
   const startSandboxScan = async () => {
     setRunning(true); setLogs([]); setRunId(null);
+    setScanStartTime(Date.now());
+    setElapsedTime(0);
+    setStreamStatus('idle');
     try {
       const res = await fetch(`${API}/api/scan`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
           model: sandboxConfig.model,
           challenger_model: sandboxConfig.challengerModel,
@@ -312,6 +356,12 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
           challengers: sandboxConfig.challengers,
         }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setLogs([{ id: Date.now(), type: 'ERROR', agent: 'ui', content: `Failed: ${err.detail || res.statusText}`, ts: Date.now() }]);
+        setRunning(false);
+        return;
+      }
       const data = await res.json();
       setRunId(data.run_id);
       subscribeToRun(data.run_id, 'sandbox');
@@ -324,9 +374,12 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
   const startRepoScan = async () => {
     if (!repoConfig.repo.trim()) return;
     setRunning(true); setLogs([]); setRunId(null);
+    setScanStartTime(Date.now());
+    setElapsedTime(0);
+    setStreamStatus('idle');
     try {
       const res = await fetch(`${API}/api/repo-scan`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
           repo: repoConfig.repo,
           model: repoConfig.model,
@@ -338,6 +391,12 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
           max_chunks: repoConfig.maxChunks,
         }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setLogs([{ id: Date.now(), type: 'ERROR', agent: 'ui', content: `Failed: ${err.detail || res.statusText}`, ts: Date.now() }]);
+        setRunning(false);
+        return;
+      }
       const data = await res.json();
       setRunId(data.run_id);
       subscribeToRun(data.run_id, repoConfig.repo);
@@ -349,32 +408,34 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
   // Parse triage findings from log for triage tab
   const triageFindings = useMemo<TriageFinding[]>(() => {
-    return logs
+    const findingsMap = new Map<string, TriageFinding>();
+    logs
       .filter(l => l.type === 'VERDICT' && l.agent === 'triage')
-      .map(log => {
-        const triage = log.content.includes('→ ✓ TP') ? 'TP'
-          : log.content.includes('→ ✗ FP') ? 'FP'
-          : log.content.includes('⋯ INCONCLUSIVE') ? 'INCONCLUSIVE' : 'PENDING';
-        const fileMatch = log.content.match(/\]\s+(.+?):(\d+)\s+\[/);
-        const sevMatch = log.content.match(/\[([A-Z]+)\]/);
-        const rationaleMatch = log.content.match(/—\s+(.+)$/);
-        return {
-          tool: 'sast', ruleId: '', ruleName: '',
-          file: fileMatch?.[1] || '?', line: parseInt(fileMatch?.[2] || '0'),
-          severity: sevMatch?.[1] || 'UNKNOWN', confidence: '',
-          cwe: null, message: rationaleMatch?.[1] || log.content, code: '',
-          triage: triage as TriageFinding['triage'],
-          triageRationale: rationaleMatch?.[1],
-        };
+      .forEach(log => {
+        const triage = log.verdict === 'TP' ? 'TP'
+          : log.verdict === 'FP' ? 'FP'
+          : log.verdict === 'INCONCLUSIVE' ? 'INCONCLUSIVE' : 'PENDING';
+        
+        const findingId = log.finding?.id || `${log.finding?.file || '?'}:${log.finding?.line || '0'}`;
+        
+        findingsMap.set(findingId, {
+          tool: log.finding?.tool || 'sast', ruleId: log.finding?.rule_id || '', ruleName: '',
+          file: log.finding?.file || '?', line: log.finding?.line || 0,
+          severity: log.finding?.severity || 'UNKNOWN', confidence: '',
+          cwe: null, message: log.finding?.message || log.content, code: log.finding?.code || '',
+          triage: triage,
+          triageRationale: log.rationale || '',
+        });
       });
+    return Array.from(findingsMap.values());
   }, [logs]);
 
-  const liveStats = useMemo(() => ({
-    findings: logs.filter(l => l.type === 'WORKER').length,
-    verdicts: logs.filter(l => l.type === 'VERDICT').length,
-    confirmed: logs.filter(l => l.content.toLowerCase().includes('confirmed')).length,
-    refuted: logs.filter(l => l.content.toLowerCase().includes('refuted')).length,
-  }), [logs]);
+  const liveStats = useMemo(() => {
+    const verdicts = triageFindings.filter(f => f.triage !== 'PENDING').length;
+    const confirmed = triageFindings.filter(f => f.triage === 'TP').length;
+    const refuted = triageFindings.filter(f => f.triage === 'FP').length;
+    return { findings: triageFindings.length, verdicts, confirmed, refuted };
+  }, [triageFindings]);
 
   const inputCls = 'scan-input';
 
@@ -404,6 +465,7 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
               {scanMode === 'sandbox' ? 'Sandbox Configuration' : 'Repository Target'}
             </h3>
 
+
             {scanMode === 'repo' && (
               <div className="scan-field">
                 <label className="scan-label">Git URL or Local Path</label>
@@ -427,81 +489,95 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
               </div>
             )}
 
-            <div className="scan-field">
-              <label className="scan-label">Discovery Model</label>
-              <input className={inputCls} type="text"
-                value={scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model}
-                onChange={e => scanMode === 'sandbox'
-                  ? setSandboxConfig(c => ({ ...c, model: e.target.value }))
-                  : setRepoConfig(c => ({ ...c, model: e.target.value }))}
-                disabled={running}
-              />
-            </div>
+            <button
+              type="button"
+              className="scan-advanced-toggle"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+            >
+              <Settings size={14} />
+              <span>Advanced Settings</span>
+              {showAdvanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
 
-            <div className="scan-field">
-              <label className="scan-label">Challenger Model</label>
-              <input className={inputCls} type="text"
-                value={scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel}
-                onChange={e => scanMode === 'sandbox'
-                  ? setSandboxConfig(c => ({ ...c, challengerModel: e.target.value }))
-                  : setRepoConfig(c => ({ ...c, challengerModel: e.target.value }))}
-                disabled={running}
-              />
-            </div>
-
-            <div className="scan-field">
-              <label className="scan-label">Workers ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
-              <input type="range" min={1} max={10}
-                value={scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers}
-                onChange={e => scanMode === 'sandbox'
-                  ? setSandboxConfig(c => ({ ...c, workers: +e.target.value }))
-                  : setRepoConfig(c => ({ ...c, workers: +e.target.value }))}
-                className="w-full accent-cyan-500" disabled={running}
-              />
-            </div>
-
-            <div className="scan-field">
-              <label className="scan-label">Challengers ({scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers})</label>
-              <input type="range" min={1} max={2}
-                value={scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers}
-                onChange={e => scanMode === 'sandbox'
-                  ? setSandboxConfig(c => ({ ...c, challengers: +e.target.value }))
-                  : setRepoConfig(c => ({ ...c, challengers: +e.target.value }))}
-                className="w-full accent-orange-500" disabled={running}
-              />
-            </div>
-
-            {scanMode === 'repo' && (
-              <div className="scan-field">
-                <label className="scan-label">Max Chunks ({repoConfig.maxChunks})</label>
-                <input type="range" min={5} max={100} step={5}
-                  value={repoConfig.maxChunks}
-                  onChange={e => setRepoConfig(c => ({ ...c, maxChunks: +e.target.value }))}
-                  className="w-full accent-violet-500" disabled={running}
-                />
-              </div>
-            )}
-
-            {scanMode === 'repo' && (
-              <div className="scan-field">
-                <label className="scan-label">SAST Tools</label>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  {['bandit', 'semgrep'].map(tool => (
-                    <label key={tool} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13, color: '#94a3b8' }}>
-                      <input type="checkbox"
-                        checked={repoConfig.sastTools.includes(tool)}
-                        onChange={() => setRepoConfig(c => ({
-                          ...c,
-                          sastTools: c.sastTools.includes(tool)
-                            ? c.sastTools.filter(t => t !== tool)
-                            : [...c.sastTools, tool],
-                        }))}
-                        className="accent-violet-500" disabled={running || repoConfig.noSast}
-                      />
-                      {tool}
-                    </label>
-                  ))}
+            {showAdvanced && (
+              <div className="scan-advanced-content">
+                <div className="scan-field">
+                  <label className="scan-label">Discovery Model</label>
+                  <input className={inputCls} type="text"
+                    value={scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model}
+                    onChange={e => scanMode === 'sandbox'
+                      ? setSandboxConfig(c => ({ ...c, model: e.target.value }))
+                      : setRepoConfig(c => ({ ...c, model: e.target.value }))}
+                    disabled={running}
+                  />
                 </div>
+
+                <div className="scan-field">
+                  <label className="scan-label">Challenger Model</label>
+                  <input className={inputCls} type="text"
+                    value={scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel}
+                    onChange={e => scanMode === 'sandbox'
+                      ? setSandboxConfig(c => ({ ...c, challengerModel: e.target.value }))
+                      : setRepoConfig(c => ({ ...c, challengerModel: e.target.value }))}
+                    disabled={running}
+                  />
+                </div>
+
+                <div className="scan-field">
+                  <label className="scan-label">Workers ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
+                  <input type="range" min={1} max={10}
+                    value={scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers}
+                    onChange={e => scanMode === 'sandbox'
+                      ? setSandboxConfig(c => ({ ...c, workers: +e.target.value }))
+                      : setRepoConfig(c => ({ ...c, workers: +e.target.value }))}
+                    className="w-full accent-cyan-500" disabled={running}
+                  />
+                </div>
+
+                <div className="scan-field">
+                  <label className="scan-label">Challengers ({scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers})</label>
+                  <input type="range" min={1} max={2}
+                    value={scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers}
+                    onChange={e => scanMode === 'sandbox'
+                      ? setSandboxConfig(c => ({ ...c, challengers: +e.target.value }))
+                      : setRepoConfig(c => ({ ...c, challengers: +e.target.value }))}
+                    className="w-full accent-orange-500" disabled={running}
+                  />
+                </div>
+
+                {scanMode === 'repo' && (
+                  <div className="scan-field">
+                    <label className="scan-label">Max Chunks ({repoConfig.maxChunks})</label>
+                    <input type="range" min={5} max={100} step={5}
+                      value={repoConfig.maxChunks}
+                      onChange={e => setRepoConfig(c => ({ ...c, maxChunks: +e.target.value }))}
+                      className="w-full accent-violet-500" disabled={running}
+                    />
+                  </div>
+                )}
+
+                {scanMode === 'repo' && (
+                  <div className="scan-field">
+                    <label className="scan-label">SAST Tools</label>
+                    <div style={{ display: 'flex', gap: 12 }}>
+                      {['bandit', 'semgrep'].map(tool => (
+                        <label key={tool} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13, color: '#94a3b8' }}>
+                          <input type="checkbox"
+                            checked={repoConfig.sastTools.includes(tool)}
+                            onChange={() => setRepoConfig(c => ({
+                              ...c,
+                              sastTools: c.sastTools.includes(tool)
+                                ? c.sastTools.filter(t => t !== tool)
+                                : [...c.sastTools, tool],
+                            }))}
+                            className="accent-violet-500" disabled={running || repoConfig.noSast}
+                          />
+                          {tool}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -524,41 +600,7 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
             </div>
           </div>
 
-          {/* Steer */}
-          {runId && running && (
-            <div className="scan-sidebar__section">
-              <button
-                onClick={() => setShowSteer(v => !v)}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#a78bfa', fontSize: 12, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                <Brain size={13} /> Human-in-the-Loop Steer
-              </button>
-              {showSteer && (
-                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <input
-                    value={steerInput}
-                    onChange={e => setSteerInput(e.target.value)}
-                    placeholder='e.g. "Focus on SQL injection"'
-                    className="scan-input"
-                    style={{ fontSize: 12 }}
-                  />
-                  <button
-                    onClick={() => {
-                      if (!steerInput.trim()) return;
-                      fetch(`${API}/api/scan/${runId}/steer`, {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt: steerInput }),
-                      }).catch(() => {});
-                      setLogs(prev => [...prev, { id: Date.now(), type: 'SYSTEM', agent: 'human', content: `[STEER] ${steerInput}`, ts: Date.now() }]);
-                      setSteerInput('');
-                    }}
-                    disabled={!steerInput.trim()}
-                    style={{ padding: '6px 12px', borderRadius: 6, background: 'rgba(167,139,250,0.2)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa', fontSize: 12, cursor: 'pointer' }}
-                  >Inject →</button>
-                </div>
-              )}
-            </div>
-          )}
+
 
           {/* Start button */}
           <button

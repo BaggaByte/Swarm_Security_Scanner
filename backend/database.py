@@ -17,8 +17,21 @@ from typing import Any, Dict, List, Optional
 _db_lock = threading.Lock()
 _mem_conn = None
 
+import tempfile
+
 def _get_db_path() -> str:
-    return os.getenv("SWARM_DB_PATH", os.path.join(os.path.dirname(__file__), "swarm_runs.db"))
+    default_path = os.path.join(os.path.dirname(__file__), "data", "swarm_runs.db")
+    try:
+        os.makedirs(os.path.dirname(default_path), exist_ok=True)
+        # Test if we can write to it
+        test_file = os.path.join(os.path.dirname(default_path), ".test_write")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+    except Exception:
+        # Fallback to temp dir due to Windows Defender / permissions
+        default_path = os.path.join(tempfile.gettempdir(), "swarm_runs.db")
+    return os.getenv("SWARM_DB_PATH", default_path)
 
 def _get_connection() -> sqlite3.Connection:
     global _mem_conn
@@ -79,6 +92,13 @@ def init_db():
                         PRIMARY KEY (run_id, finding_idx)
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS architecture (
+                        repo_url TEXT PRIMARY KEY,
+                        map_json TEXT NOT NULL,
+                        updated_at REAL NOT NULL
+                    )
+                """)
         finally:
             _release_connection(conn)
 
@@ -108,6 +128,19 @@ def update_run_status(run_id: str, status: str, exit_code: Optional[int] = None)
                 conn.execute(
                     "UPDATE runs SET status = ?, exit_code = ?, completed_at = ? WHERE run_id = ?",
                     (status, exit_code, completed_at, run_id),
+                )
+        finally:
+            _release_connection(conn)
+
+def mark_interrupted_runs():
+    """Mark any 'running' scans as 'error' after a server restart."""
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE runs SET status = 'error', exit_code = -2, completed_at = ? WHERE status = 'running'",
+                    (time.time(),)
                 )
         finally:
             _release_connection(conn)
@@ -182,3 +215,47 @@ def get_feedback_for_run(run_id: str) -> Dict[int, str]:
             return {row["finding_idx"]: row["human_verdict"] for row in cur.fetchall()}
         finally:
             _release_connection(conn)
+
+def save_architecture(repo_url: str, map_json: str):
+    # Ensure neither host root path nor raw file contents are ever persisted
+    try:
+        data = json.loads(map_json)
+        if isinstance(data, dict):
+            data.pop("root", None)
+            data.pop("files", None)
+            map_json = json.dumps(data)
+    except Exception:
+        pass
+
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO architecture (repo_url, map_json, updated_at) VALUES (?, ?, ?)",
+                    (repo_url, map_json, time.time())
+                )
+        finally:
+            _release_connection(conn)
+
+def get_architecture(repo_url: str) -> Optional[str]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT map_json FROM architecture WHERE repo_url = ?", (repo_url,))
+            row = cur.fetchone()
+            if row:
+                raw = row["map_json"]
+                try:
+                    data = json.loads(raw)
+                    if isinstance(data, dict) and ("root" in data or "files" in data):
+                        data.pop("root", None)
+                        data.pop("files", None)
+                        return json.dumps(data)
+                except Exception:
+                    pass
+                return raw
+            return None
+        finally:
+            _release_connection(conn)
+
