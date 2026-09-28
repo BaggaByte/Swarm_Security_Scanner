@@ -113,7 +113,7 @@ cp .env.example .env
 docker compose -f docker-compose.prod.yml up --build -d
 ```
 
-The production server starts on `http://localhost:8000` with 4 Uvicorn workers and static asset serving.
+The production server starts on `http://localhost:8000` with a single Uvicorn worker (to prevent in-memory state conflicts) and static asset serving. The compose stack also includes an embedded Ollama service for local LLM inference.
 
 #### 2. Local Development
 
