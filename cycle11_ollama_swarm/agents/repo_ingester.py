@@ -174,11 +174,46 @@ def detect_technologies(content: str) -> list[str]:
 # Repository cloner
 # ---------------------------------------------------------------------------
 
+def _validate_repo_url(url: str):
+    import urllib.parse
+    import socket
+    import ipaddress
+    parsed = urllib.parse.urlparse(url.strip())
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"Security error: only 'https://' Git repositories are permitted (got {parsed.scheme})")
+    if parsed.username or parsed.password:
+        raise ValueError("Security error: credentials in Git URLs are forbidden")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Security error: missing hostname in Git URL")
+    try:
+        addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+        for entry in addr_info:
+            ip = ipaddress.ip_address(entry[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise ValueError(f"Security error: Git URL resolves to blocked/internal IP {ip}")
+    except socket.gaierror:
+        raise ValueError(f"Security error: unable to resolve hostname '{hostname}'")
+
+def _validate_local_path(path_str: str):
+    real = os.path.realpath(path_str)
+    real_lower = real.lower()
+    forbidden = ["/etc", "/var", "/proc", "/sys", "/dev", "/root", "c:\\windows", "c:\\program files"]
+    for fb in forbidden:
+        if real_lower == fb or real_lower.startswith(fb + os.sep) or real_lower.startswith(fb + "/"):
+            raise PermissionError(f"Security error: scanning system directory '{path_str}' is forbidden")
+    allowed_root = os.getenv("SWARM_ALLOWED_SCAN_ROOT")
+    if allowed_root:
+        real_root = os.path.realpath(allowed_root)
+        if not (real == real_root or real.startswith(real_root + os.sep)):
+            raise PermissionError(f"Security error: path must be inside SWARM_ALLOWED_SCAN_ROOT: {real_root}")
+
 def clone_repo(url: str, target_dir: Optional[str] = None) -> str:
     """
     Clone a Git repository. Returns the absolute path to the cloned directory.
     Falls back to shallow clone (--depth 1) for speed.
     """
+    _validate_repo_url(url)
     if target_dir is None:
         target_dir = tempfile.mkdtemp(prefix="swarm_repo_")
     else:
@@ -380,6 +415,7 @@ def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: 
         repo_name = source.rstrip("/").split("/")[-1].removesuffix(".git")
     else:
         repo_root = os.path.abspath(source)
+        _validate_local_path(repo_root)
         if not os.path.isdir(repo_root):
             raise FileNotFoundError(f"Repository path not found: {repo_root}")
         repo_name = os.path.basename(repo_root)

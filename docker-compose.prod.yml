@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  swarm-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: swarm-security-scanner:prod
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - SWARM_API_KEY=${SWARM_API_KEY}
+      - SWARM_ALLOW_ANONYMOUS=false
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - SWARM_MAX_CONCURRENT_SCANS=3
+      - SWARM_SANDBOX_NETWORK=swarm-internal
+      - SWARM_ALLOWED_SANDBOX_TARGETS=http://sandbox-target:5000
+    volumes:
+      - swarm_data:/app/backend/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+    networks:
+      - swarm-internal
+
+  sandbox-target:
+    image: python:3.11-alpine
+    restart: "no"
+    command: ["python", "-m", "http.server", "5000"]
+    networks:
+      - swarm-internal
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+volumes:
+  swarm_data:
+
+networks:
+  swarm-internal:
+    internal: true # Disallow external internet routing for internal test traffic

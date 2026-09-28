@@ -98,7 +98,26 @@ cd frontend
 npm install
 ```
 
-### Launch
+### Launch Options
+
+#### 1. Production Deployment (Recommended for Servers)
+
+Deploy the hardened, containerized stack with non-root containers, internal network isolation, and precompiled Vite assets:
+
+```bash
+# 1. Configure environment and generate secure API key
+cp .env.example .env
+# Edit .env and set SWARM_API_KEY, GITHUB_WEBHOOK_SECRET
+
+# 2. Build and launch with Docker Compose
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+The production server starts on `http://localhost:8000` with 4 Uvicorn workers and static asset serving.
+
+#### 2. Local Development
+
+For local research and interactive development:
 
 **Windows — One click:**
 ```
@@ -116,9 +135,26 @@ cd frontend
 npm run dev
 ```
 
+> For local development without authentication, set `SWARM_ALLOW_ANONYMOUS=true` in `.env`.
 > Make sure `ollama serve` is running before starting a scan.
 
 Open **http://localhost:5173** in your browser.
+
+---
+
+## 🔒 Production Security Architecture
+
+The Swarm Security Scanner implements Defense-in-Depth AppSec controls across 5 core areas:
+
+| Security Domain | Implementation | Defense Mechanism |
+|---|---|---|
+| **API Authentication** | `backend/security.py` | Bearer token / `X-API-Key` / query token for SSE. Rejects anonymous access in production. |
+| **Boundary & Path Traversal** | `backend/security.py` | Canonical `realpath` resolution, system root blocking (`/etc`, `/proc`, `C:\Windows`), `SWARM_ALLOWED_SCAN_ROOT` jail. |
+| **SSRF Prevention** | `backend/security.py` | HTTPS scheme enforcement, DNS resolution check, blocks loopback, link-local, RFC-1918 private IPs, and cloud metadata (`169.254.169.254`). |
+| **Exploit Sandbox Isolation** | `backend/sandbox_runner.py` | Docker container runs with `network_mode="none"`, `read_only=True`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, strict memory/CPU/PID limits, and unprivileged user (`UID 1000`). |
+| **Webhook Verification** | `backend/main.py` | Mandatory HMAC-SHA256 signature verification (`X-Hub-Signature-256`), rejects unsigned or invalid payloads. |
+| **Durable Persistence** | `backend/database.py` | SQLite backing store preserves scan runs, audit logs, and human feedback across service restarts. |
+| **Automated CI/CD** | `.github/workflows/ci.yml` | GitHub Actions pipeline running linting, type checks, and full security test suite on all PRs. |
 
 ---
 
