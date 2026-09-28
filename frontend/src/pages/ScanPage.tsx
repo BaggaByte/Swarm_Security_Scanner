@@ -1,0 +1,675 @@
+/**
+ * ScanPage — Live scanning console (sandbox + repo modes).
+ * Wraps the existing SwarmGraph + LogFeed logic from the original App.tsx
+ * and exposes callbacks so findings can be saved to the product store.
+ */
+
+import React, {
+  useState, useEffect, useRef, useCallback, useMemo,
+} from 'react';
+import {
+  ReactFlow, Background, Controls, MiniMap,
+  addEdge, useNodesState, useEdgesState,
+  type Node, type Edge, type Connection,
+  BackgroundVariant,
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import { Play, TerminalSquare, Share2, Brain } from 'lucide-react';
+import type {
+  LogEntry, LogType, SandboxScanConfig, RepoScanConfig,
+  TriageFinding, Finding, ScanRun, Repository,
+} from '../types';
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const API = 'http://localhost:8000';
+
+const LOG_TYPE_ICON: Record<LogType, string> = {
+  PHASE: '⬡', WORKER: '◈', CHALLENGER: '⚔', VERDICT: '◎',
+  SYSTEM: '·', ERROR: '✗', DONE: '✓',
+};
+
+const CYCLE_OPTIONS = ['11', '13a', '13b', '14', '15', '16', '17', '18', '19', '20', '21', '22'];
+
+const DEFAULT_SANDBOX: SandboxScanConfig = {
+  model: 'groq/llama-3.1-8b-instant',
+  challengerModel: 'groq/llama-3.1-8b-instant',
+  cycle: '22',
+  workers: 5,
+  challengers: 2,
+};
+
+const DEFAULT_REPO: RepoScanConfig = {
+  repo: '',
+  model: 'groq/llama-3.1-8b-instant',
+  challengerModel: 'groq/llama-3.1-8b-instant',
+  workers: 5,
+  challengers: 2,
+  sastTools: ['bandit', 'semgrep'],
+  noSast: false,
+  maxChunks: 20,
+};
+
+const SEV_COLORS: Record<string, string> = {
+  CRITICAL: '#f87171', HIGH: '#fb923c', MEDIUM: '#fbbf24', LOW: '#a3e635', INFO: '#94a3b8',
+};
+
+// ── Node graph helpers ────────────────────────────────────────────────────────
+
+function nodeStyle(accent: string) {
+  return {
+    background: 'rgba(13,23,38,0.85)',
+    border: `1.5px solid ${accent}55`,
+    borderRadius: '10px',
+    color: '#e2e8f0',
+    fontFamily: 'Inter, sans-serif',
+    fontSize: '11px',
+    fontWeight: 500,
+    padding: '8px 14px',
+    boxShadow: `0 0 12px ${accent}22`,
+    minWidth: 120,
+    textAlign: 'center' as const,
+  };
+}
+
+function activeNodeStyle(accent: string) {
+  return {
+    ...nodeStyle(accent),
+    border: `1.5px solid ${accent}`,
+    boxShadow: `0 0 20px ${accent}55, 0 0 40px ${accent}22`,
+    transform: 'scale(1.04)',
+    transition: 'all 0.3s ease',
+  };
+}
+
+function buildNodes(workers: number, challengers: number): Node[] {
+  const nodes: Node[] = [{
+    id: 'orchestrator', type: 'default',
+    data: { label: '🔧 Orchestrator' },
+    position: { x: 400, y: 40 },
+    style: nodeStyle('#0ea5e9'),
+  }];
+  for (let i = 0; i < workers; i++) {
+    nodes.push({ id: `worker-${i}`, type: 'default', data: { label: `⬡ Worker ${i + 1}` }, position: { x: 80 + i * 160, y: 180 }, style: nodeStyle('#84cc16') });
+  }
+  for (let i = 0; i < challengers; i++) {
+    nodes.push({ id: `challenger-${i}`, type: 'default', data: { label: `⚔ Challenger ${i + 1}` }, position: { x: 240 + i * 200, y: 340 }, style: nodeStyle('#f97316') });
+  }
+  nodes.push({ id: 'verdict', type: 'default', data: { label: '◎ Verdict Engine' }, position: { x: 340, y: 480 }, style: nodeStyle('#a855f7') });
+  return nodes;
+}
+
+function buildEdges(workers: number, challengers: number): Edge[] {
+  const edges: Edge[] = [];
+  for (let i = 0; i < workers; i++) edges.push({ id: `e-o-w${i}`, source: 'orchestrator', target: `worker-${i}`, animated: false });
+  for (let i = 0; i < workers; i++) for (let c = 0; c < challengers; c++) edges.push({ id: `e-w${i}-c${c}`, source: `worker-${i}`, target: `challenger-${c}`, animated: false });
+  for (let i = 0; i < challengers; i++) edges.push({ id: `e-c${i}-v`, source: `challenger-${i}`, target: 'verdict', animated: false });
+  return edges;
+}
+
+function parseLine(raw: string): LogEntry | null {
+  const line = raw.trim();
+  if (!line || line.startsWith(':')) return null;
+  try {
+    const obj = JSON.parse(line);
+    return { id: Date.now() + Math.random(), type: (obj.type || 'SYSTEM') as LogType, agent: obj.agent || 'system', content: obj.content || line, ts: Date.now() };
+  } catch {
+    return { id: Date.now() + Math.random(), type: 'SYSTEM', agent: 'runner', content: line, ts: Date.now() };
+  }
+}
+
+// ── Parse triage from SSE logs ─────────────────────────────────────────────
+
+function extractFindings(logs: LogEntry[], scanId: string, repo: string): Finding[] {
+  const results: Finding[] = [];
+  for (const log of logs) {
+    if (log.type === 'VERDICT' && log.agent === 'triage') {
+      const triage = log.content.includes('→ ✓ TP') || log.content.includes('Consensus: ✓ TP') ? 'TP'
+        : log.content.includes('→ ✗ FP') || log.content.includes('Consensus: ✗ FP') ? 'FP'
+        : log.content.includes('⋯ INCONCLUSIVE') ? 'INCONCLUSIVE' : 'PENDING';
+      const fileMatch = log.content.match(/\]\s+(.+?):(\d+)\s+\[/);
+      const sevMatch = log.content.match(/\[([A-Z]+)\]/);
+      const rationaleMatch = log.content.match(/—\s+(.+)$/);
+      if (fileMatch) {
+        results.push({
+          id: `${scanId}-${fileMatch[1]}-${fileMatch[2]}-${Math.random()}`,
+          repository: repo || 'sandbox',
+          file: fileMatch[1],
+          line: parseInt(fileMatch[2]),
+          title: `${triage === 'TP' ? 'Vulnerability' : 'Alert'} in ${fileMatch[1].split('/').pop()}`,
+          description: rationaleMatch?.[1] || log.content,
+          severity: (sevMatch?.[1] || 'MEDIUM') as Finding['severity'],
+          cwe: null,
+          owasp: null,
+          status: triage === 'FP' ? 'false_positive' : 'new',
+          aiVerdict: triage as Finding['aiVerdict'],
+          swarmRationale: rationaleMatch?.[1] || '',
+          tool: 'sast',
+          ruleId: '',
+          firstDetected: Date.now(),
+          lastDetected: Date.now(),
+          scanId,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function extractMetrics(logs: LogEntry[]) {
+  const m: Record<string, number> = {};
+  for (const log of logs) {
+    if (log.agent === 'metrics') {
+      const extract = (label: string) => {
+        const match = log.content.match(new RegExp(`${label}[:\\s]+([\\d.]+)`));
+        return match ? parseFloat(match[1]) : undefined;
+      };
+      if (log.content.includes('SAST Findings:')) m.sastFindingCount = extract('SAST Findings') ?? m.sastFindingCount;
+      if (log.content.includes('Duration:')) m.durationSeconds = extract('Duration') ?? m.durationSeconds;
+      if (log.content.includes('Tokens')) m.tokensEstimated = extract('Tokens') ?? m.tokensEstimated;
+      const fpRateMatch = log.content.match(/FP Reduction Rate:\s+([\d.]+)%/);
+      if (fpRateMatch) m.fpReductionRate = parseFloat(fpRateMatch[1]);
+    }
+  }
+  return m;
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+interface ScanPageProps {
+  preloadRepo?: string;
+  onFindingsFound: (findings: Finding[]) => void;
+  onScanRunSaved: (run: ScanRun) => void;
+  onRepoAdded: (repo: Repository) => void;
+}
+
+export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved, onRepoAdded }: ScanPageProps) {
+  const [scanMode, setScanMode] = useState<'sandbox' | 'repo'>(preloadRepo ? 'repo' : 'sandbox');
+  const [sandboxConfig, setSandboxConfig] = useState<SandboxScanConfig>(DEFAULT_SANDBOX);
+  const [repoConfig, setRepoConfig] = useState<RepoScanConfig>({ ...DEFAULT_REPO, repo: preloadRepo || '' });
+
+  const [running, setRunning] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'graph' | 'logs' | 'triage'>('graph');
+  const [steerInput, setSteerInput] = useState('');
+  const [showSteer, setShowSteer] = useState(false);
+
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const esRef = useRef<EventSource | null>(null);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState(buildNodes(sandboxConfig.workers, sandboxConfig.challengers));
+  const [edges, setEdges, onEdgesChange] = useEdgesState(buildEdges(sandboxConfig.workers, sandboxConfig.challengers));
+  const onConnect = useCallback((conn: Connection) => setEdges(eds => addEdge(conn, eds)), [setEdges]);
+
+  useEffect(() => {
+    if (!running) {
+      setNodes(buildNodes(sandboxConfig.workers, sandboxConfig.challengers));
+      setEdges(buildEdges(sandboxConfig.workers, sandboxConfig.challengers));
+    }
+  }, [sandboxConfig.workers, sandboxConfig.challengers, running, setNodes, setEdges]);
+
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+
+  const subscribeToRun = useCallback((id: string, repo: string) => {
+    if (esRef.current) esRef.current.close();
+    const es = new EventSource(`${API}/api/scan/${id}/stream`);
+    esRef.current = es;
+
+    es.onmessage = (event) => {
+      const entry = parseLine(event.data);
+      if (!entry) return;
+      setLogs(prev => [...prev.slice(-1999), entry]);
+
+      // Animate graph nodes
+      if (entry.type === 'WORKER') {
+        const idx = parseInt(entry.agent.replace(/\D/g, '')) || 0;
+        const nid = `worker-${idx % sandboxConfig.workers}`;
+        setNodes(nds => nds.map(n => n.id === nid ? { ...n, style: activeNodeStyle('#84cc16') } : n));
+        setTimeout(() => setNodes(nds => nds.map(n => n.id === nid ? { ...n, style: nodeStyle('#84cc16') } : n)), 2000);
+      }
+      if (entry.type === 'CHALLENGER') {
+        const idx = parseInt(entry.agent.replace(/\D/g, '')) || 0;
+        const nid = `challenger-${idx % sandboxConfig.challengers}`;
+        setNodes(nds => nds.map(n => n.id === nid ? { ...n, style: activeNodeStyle('#f97316') } : n));
+        setTimeout(() => setNodes(nds => nds.map(n => n.id === nid ? { ...n, style: nodeStyle('#f97316') } : n)), 2000);
+      }
+      if (entry.type === 'VERDICT') {
+        setNodes(nds => nds.map(n => n.id === 'verdict' ? { ...n, style: activeNodeStyle('#a855f7') } : n));
+        setTimeout(() => setNodes(nds => nds.map(n => n.id === 'verdict' ? { ...n, style: nodeStyle('#a855f7') } : n)), 2000);
+      }
+      if (entry.type === 'PHASE') {
+        setNodes(nds => nds.map(n => n.id === 'orchestrator' ? { ...n, data: { label: `🔧 ${entry.content.slice(0, 28)}` }, style: activeNodeStyle('#0ea5e9') } : n));
+      }
+
+      if (entry.type === 'DONE' || entry.type === 'ERROR') {
+        es.close();
+        setRunning(false);
+        // extract and save findings
+        setLogs(prev => {
+          const allLogs = [...prev, entry];
+          const findings = extractFindings(allLogs, id, repo);
+          const rawMetrics = extractMetrics(allLogs);
+          if (findings.length > 0) onFindingsFound(findings);
+
+          const run: ScanRun = {
+            id,
+            type: scanMode,
+            repository: repo || undefined,
+            status: entry.type === 'DONE' ? 'done' : 'error',
+            startedAt: Date.now() - (rawMetrics.durationSeconds || 0) * 1000,
+            finishedAt: Date.now(),
+            model: scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model,
+            challengerModel: scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel,
+            workers: scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers,
+            challengers: scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers,
+            findingCount: findings.length,
+            confirmedCount: findings.filter(f => f.aiVerdict === 'TP').length,
+            fpCount: findings.filter(f => f.aiVerdict === 'FP').length,
+            metrics: rawMetrics.durationSeconds ? {
+              durationSeconds: rawMetrics.durationSeconds,
+              tokensEstimated: rawMetrics.tokensEstimated || 0,
+              sastFindingCount: rawMetrics.sastFindingCount || 0,
+              swarmConfirmed: findings.filter(f => f.aiVerdict === 'TP').length,
+              fpReductionRate: rawMetrics.fpReductionRate || 0,
+            } : undefined,
+          };
+          onScanRunSaved(run);
+
+          // Also register the repo if not already done
+          if (repo && (repo.startsWith('http') || repo.startsWith('/'))) {
+            const parts = repo.replace(/\.git$/, '').split('/');
+            const name = parts[parts.length - 1] || repo;
+            onRepoAdded({
+              id: repo,
+              name,
+              url: repo,
+              type: repo.includes('github.com') ? 'github' : repo.includes('gitlab.com') ? 'gitlab' : 'local',
+              lastScanned: Date.now(),
+              openFindings: findings.filter(f => f.status === 'new').length,
+              criticalCount: findings.filter(f => f.severity === 'CRITICAL').length,
+              highCount: findings.filter(f => f.severity === 'HIGH').length,
+            });
+          }
+          return allLogs;
+        });
+      }
+    };
+
+    es.onerror = () => { es.close(); setRunning(false); };
+  }, [sandboxConfig, repoConfig, scanMode, onFindingsFound, onScanRunSaved, onRepoAdded, setNodes]);
+
+  const startSandboxScan = async () => {
+    setRunning(true); setLogs([]); setRunId(null);
+    try {
+      const res = await fetch(`${API}/api/scan`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: sandboxConfig.model,
+          challenger_model: sandboxConfig.challengerModel,
+          cycle: sandboxConfig.cycle,
+          workers: sandboxConfig.workers,
+          challengers: sandboxConfig.challengers,
+        }),
+      });
+      const data = await res.json();
+      setRunId(data.run_id);
+      subscribeToRun(data.run_id, 'sandbox');
+    } catch (err) {
+      setLogs([{ id: 1, type: 'ERROR', agent: 'ui', content: `Failed: ${err}`, ts: Date.now() }]);
+      setRunning(false);
+    }
+  };
+
+  const startRepoScan = async () => {
+    if (!repoConfig.repo.trim()) return;
+    setRunning(true); setLogs([]); setRunId(null);
+    try {
+      const res = await fetch(`${API}/api/repo-scan`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: repoConfig.repo,
+          model: repoConfig.model,
+          challenger_model: repoConfig.challengerModel,
+          workers: repoConfig.workers,
+          challengers: repoConfig.challengers,
+          sast_tools: repoConfig.sastTools,
+          no_sast: repoConfig.noSast,
+          max_chunks: repoConfig.maxChunks,
+        }),
+      });
+      const data = await res.json();
+      setRunId(data.run_id);
+      subscribeToRun(data.run_id, repoConfig.repo);
+    } catch (err) {
+      setLogs([{ id: 1, type: 'ERROR', agent: 'ui', content: `Failed: ${err}`, ts: Date.now() }]);
+      setRunning(false);
+    }
+  };
+
+  // Parse triage findings from log for triage tab
+  const triageFindings = useMemo<TriageFinding[]>(() => {
+    return logs
+      .filter(l => l.type === 'VERDICT' && l.agent === 'triage')
+      .map(log => {
+        const triage = log.content.includes('→ ✓ TP') ? 'TP'
+          : log.content.includes('→ ✗ FP') ? 'FP'
+          : log.content.includes('⋯ INCONCLUSIVE') ? 'INCONCLUSIVE' : 'PENDING';
+        const fileMatch = log.content.match(/\]\s+(.+?):(\d+)\s+\[/);
+        const sevMatch = log.content.match(/\[([A-Z]+)\]/);
+        const rationaleMatch = log.content.match(/—\s+(.+)$/);
+        return {
+          tool: 'sast', ruleId: '', ruleName: '',
+          file: fileMatch?.[1] || '?', line: parseInt(fileMatch?.[2] || '0'),
+          severity: sevMatch?.[1] || 'UNKNOWN', confidence: '',
+          cwe: null, message: rationaleMatch?.[1] || log.content, code: '',
+          triage: triage as TriageFinding['triage'],
+          triageRationale: rationaleMatch?.[1],
+        };
+      });
+  }, [logs]);
+
+  const liveStats = useMemo(() => ({
+    findings: logs.filter(l => l.type === 'WORKER').length,
+    verdicts: logs.filter(l => l.type === 'VERDICT').length,
+    confirmed: logs.filter(l => l.content.toLowerCase().includes('confirmed')).length,
+    refuted: logs.filter(l => l.content.toLowerCase().includes('refuted')).length,
+  }), [logs]);
+
+  const inputCls = 'scan-input';
+
+  return (
+    <div className="scan-page">
+      {/* Mode tabs */}
+      <div className="scan-mode-tabs">
+        <button
+          className={`scan-mode-tab ${scanMode === 'sandbox' ? 'scan-mode-tab--active' : ''}`}
+          onClick={() => setScanMode('sandbox')}
+        >
+          <span>◈ Sandbox Mode</span>
+        </button>
+        <button
+          className={`scan-mode-tab ${scanMode === 'repo' ? 'scan-mode-tab--active' : ''}`}
+          onClick={() => setScanMode('repo')}
+        >
+          <span>⬡ Real-World Repository</span>
+        </button>
+      </div>
+
+      <div className="scan-layout">
+        {/* ── Sidebar ── */}
+        <aside className="scan-sidebar">
+          <div className="scan-sidebar__section">
+            <h3 className="scan-sidebar__heading">
+              {scanMode === 'sandbox' ? 'Sandbox Configuration' : 'Repository Target'}
+            </h3>
+
+            {scanMode === 'repo' && (
+              <div className="scan-field">
+                <label className="scan-label">Git URL or Local Path</label>
+                <input
+                  className={inputCls}
+                  type="text"
+                  value={repoConfig.repo}
+                  onChange={e => setRepoConfig(c => ({ ...c, repo: e.target.value }))}
+                  placeholder="https://github.com/org/repo"
+                  disabled={running}
+                />
+              </div>
+            )}
+
+            {scanMode === 'sandbox' && (
+              <div className="scan-field">
+                <label className="scan-label">Cycle</label>
+                <select className={inputCls} value={sandboxConfig.cycle} onChange={e => setSandboxConfig(c => ({ ...c, cycle: e.target.value }))} disabled={running}>
+                  {CYCLE_OPTIONS.map(v => <option key={v} value={v}>Cycle {v}</option>)}
+                </select>
+              </div>
+            )}
+
+            <div className="scan-field">
+              <label className="scan-label">Discovery Model</label>
+              <input className={inputCls} type="text"
+                value={scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model}
+                onChange={e => scanMode === 'sandbox'
+                  ? setSandboxConfig(c => ({ ...c, model: e.target.value }))
+                  : setRepoConfig(c => ({ ...c, model: e.target.value }))}
+                disabled={running}
+              />
+            </div>
+
+            <div className="scan-field">
+              <label className="scan-label">Challenger Model</label>
+              <input className={inputCls} type="text"
+                value={scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel}
+                onChange={e => scanMode === 'sandbox'
+                  ? setSandboxConfig(c => ({ ...c, challengerModel: e.target.value }))
+                  : setRepoConfig(c => ({ ...c, challengerModel: e.target.value }))}
+                disabled={running}
+              />
+            </div>
+
+            <div className="scan-field">
+              <label className="scan-label">Workers ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
+              <input type="range" min={1} max={10}
+                value={scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers}
+                onChange={e => scanMode === 'sandbox'
+                  ? setSandboxConfig(c => ({ ...c, workers: +e.target.value }))
+                  : setRepoConfig(c => ({ ...c, workers: +e.target.value }))}
+                className="w-full accent-cyan-500" disabled={running}
+              />
+            </div>
+
+            <div className="scan-field">
+              <label className="scan-label">Challengers ({scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers})</label>
+              <input type="range" min={1} max={2}
+                value={scanMode === 'sandbox' ? sandboxConfig.challengers : repoConfig.challengers}
+                onChange={e => scanMode === 'sandbox'
+                  ? setSandboxConfig(c => ({ ...c, challengers: +e.target.value }))
+                  : setRepoConfig(c => ({ ...c, challengers: +e.target.value }))}
+                className="w-full accent-orange-500" disabled={running}
+              />
+            </div>
+
+            {scanMode === 'repo' && (
+              <div className="scan-field">
+                <label className="scan-label">Max Chunks ({repoConfig.maxChunks})</label>
+                <input type="range" min={5} max={100} step={5}
+                  value={repoConfig.maxChunks}
+                  onChange={e => setRepoConfig(c => ({ ...c, maxChunks: +e.target.value }))}
+                  className="w-full accent-violet-500" disabled={running}
+                />
+              </div>
+            )}
+
+            {scanMode === 'repo' && (
+              <div className="scan-field">
+                <label className="scan-label">SAST Tools</label>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  {['bandit', 'semgrep'].map(tool => (
+                    <label key={tool} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13, color: '#94a3b8' }}>
+                      <input type="checkbox"
+                        checked={repoConfig.sastTools.includes(tool)}
+                        onChange={() => setRepoConfig(c => ({
+                          ...c,
+                          sastTools: c.sastTools.includes(tool)
+                            ? c.sastTools.filter(t => t !== tool)
+                            : [...c.sastTools, tool],
+                        }))}
+                        className="accent-violet-500" disabled={running || repoConfig.noSast}
+                      />
+                      {tool}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Live stats */}
+          <div className="scan-sidebar__section">
+            <h3 className="scan-sidebar__heading">Live Metrics</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {[
+                { label: 'Findings', value: liveStats.findings, color: '#a3e635' },
+                { label: 'Verdicts', value: liveStats.verdicts, color: '#c084fc' },
+                { label: 'Confirmed', value: liveStats.confirmed, color: '#34d399' },
+                { label: 'Refuted', value: liveStats.refuted, color: '#f87171' },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: '8px 10px', textAlign: 'center' }}>
+                  <div style={{ color, fontSize: 20, fontWeight: 700 }}>{value}</div>
+                  <div style={{ color: '#475569', fontSize: 10, textTransform: 'uppercase', marginTop: 2 }}>{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Steer */}
+          {runId && running && (
+            <div className="scan-sidebar__section">
+              <button
+                onClick={() => setShowSteer(v => !v)}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#a78bfa', fontSize: 12, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                <Brain size={13} /> Human-in-the-Loop Steer
+              </button>
+              {showSteer && (
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <input
+                    value={steerInput}
+                    onChange={e => setSteerInput(e.target.value)}
+                    placeholder='e.g. "Focus on SQL injection"'
+                    className="scan-input"
+                    style={{ fontSize: 12 }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (!steerInput.trim()) return;
+                      fetch(`${API}/api/scan/${runId}/steer`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prompt: steerInput }),
+                      }).catch(() => {});
+                      setLogs(prev => [...prev, { id: Date.now(), type: 'SYSTEM', agent: 'human', content: `[STEER] ${steerInput}`, ts: Date.now() }]);
+                      setSteerInput('');
+                    }}
+                    disabled={!steerInput.trim()}
+                    style={{ padding: '6px 12px', borderRadius: 6, background: 'rgba(167,139,250,0.2)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa', fontSize: 12, cursor: 'pointer' }}
+                  >Inject →</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Start button */}
+          <button
+            onClick={scanMode === 'sandbox' ? startSandboxScan : startRepoScan}
+            disabled={running || (scanMode === 'repo' && !repoConfig.repo.trim())}
+            className="scan-start-btn"
+          >
+            {running
+              ? <><span className="pulse-dot" style={{ color: '#38bdf8' }} /> Scanning…</>
+              : <><Play size={14} /> {scanMode === 'sandbox' ? 'Start Sandbox Scan' : 'Start Repository Scan'}</>}
+          </button>
+        </aside>
+
+        {/* ── Main panel ── */}
+        <div className="scan-main">
+          {/* Tab bar */}
+          <div className="scan-tabs">
+            {[
+              { id: 'graph', label: '⬡ Agent Graph', icon: <Share2 size={13} /> },
+              { id: 'logs', label: `◈ Live Logs${logs.length > 0 ? ` (${logs.length})` : ''}`, icon: <TerminalSquare size={13} /> },
+              { id: 'triage', label: `⚖ Triage Queue${triageFindings.length > 0 ? ` (${triageFindings.length})` : ''}`, icon: null },
+            ].map(t => (
+              <button
+                key={t.id}
+                className={`scan-tab ${activeTab === t.id ? 'scan-tab--active' : ''}`}
+                onClick={() => setActiveTab(t.id as typeof activeTab)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Agent Graph */}
+          {activeTab === 'graph' && (
+            <div style={{ flex: 1, position: 'relative' }}>
+              {!running && logs.length === 0 && (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, pointerEvents: 'none' }}>
+                  <div className="glass" style={{ padding: '28px 36px', textAlign: 'center', maxWidth: 340 }}>
+                    <p style={{ fontSize: 36, marginBottom: 8 }}>⬡</p>
+                    <p style={{ color: '#e2e8f0', fontWeight: 600, marginBottom: 4 }}>Swarm Ready</p>
+                    <p style={{ color: '#64748b', fontSize: 13, lineHeight: 1.5 }}>Configure your scan in the sidebar and click <strong style={{ color: '#38bdf8' }}>Start</strong> to begin.</p>
+                  </div>
+                </div>
+              )}
+              <ReactFlow
+                nodes={nodes} edges={edges}
+                onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
+                fitView fitViewOptions={{ padding: 0.25 }}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1e293b" />
+                <Controls style={{ background: 'rgba(13,23,38,0.8)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8 }} />
+                <MiniMap style={{ background: 'rgba(13,23,38,0.8)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8 }} nodeColor="#334155" maskColor="rgba(6,11,20,0.7)" />
+              </ReactFlow>
+            </div>
+          )}
+
+          {/* Logs */}
+          {activeTab === 'logs' && (
+            <div id="log-feed" style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, background: '#030710', lineHeight: 1.7 }}>
+              {logs.length === 0 && <div style={{ color: '#1e293b', fontStyle: 'italic', textAlign: 'center', marginTop: 60 }}>{running ? 'Waiting for first log…' : 'Start a scan to see live output.'}</div>}
+              {logs.map(entry => (
+                <div key={entry.id} className={`log-${entry.type}`} style={{ display: 'flex', gap: 8, marginBottom: 2 }}>
+                  <span style={{ opacity: 0.5, userSelect: 'none', flexShrink: 0 }}>{LOG_TYPE_ICON[entry.type]}</span>
+                  <span style={{ color: '#334155', flexShrink: 0 }}>[{new Date(entry.ts).toLocaleTimeString()}]</span>
+                  <span style={{ color: '#475569', flexShrink: 0 }}>[{entry.agent}]</span>
+                  <span style={{ wordBreak: 'break-all' }}>{entry.content}</span>
+                </div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          )}
+
+          {/* Triage Queue */}
+          {activeTab === 'triage' && (
+            <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+              {triageFindings.length === 0 ? (
+                <div style={{ textAlign: 'center', marginTop: 60, color: '#334155', fontStyle: 'italic', fontSize: 13 }}>
+                  {running ? 'Triage results appear here as SAST alerts are reviewed…' : 'No triage results yet.'}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                    <span style={{ color: '#34d399', background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.2)', borderRadius: 20, padding: '2px 10px', fontSize: 12 }}>✓ {triageFindings.filter(f => f.triage === 'TP').length} TP</span>
+                    <span style={{ color: '#f87171', background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 20, padding: '2px 10px', fontSize: 12 }}>✗ {triageFindings.filter(f => f.triage === 'FP').length} FP</span>
+                    <span style={{ color: '#94a3b8', background: 'rgba(148,163,184,0.1)', border: '1px solid rgba(148,163,184,0.15)', borderRadius: 20, padding: '2px 10px', fontSize: 12 }}>⋯ {triageFindings.filter(f => f.triage === 'INCONCLUSIVE').length} Inconclusive</span>
+                  </div>
+                  {triageFindings.map((f, i) => (
+                    <div key={i} className="glass" style={{ padding: 14, borderColor: f.triage === 'TP' ? 'rgba(52,211,153,0.3)' : f.triage === 'FP' ? 'rgba(248,113,113,0.2)' : undefined }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ color: SEV_COLORS[f.severity] || '#94a3b8', background: `${SEV_COLORS[f.severity] || '#94a3b8'}18`, border: `1px solid ${SEV_COLORS[f.severity] || '#94a3b8'}44`, borderRadius: 4, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>{f.severity}</span>
+                          <span style={{ color: '#64748b', fontSize: 12, fontFamily: 'JetBrains Mono, monospace' }}>{f.file}:{f.line}</span>
+                        </div>
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                          color: f.triage === 'TP' ? '#34d399' : f.triage === 'FP' ? '#f87171' : '#fbbf24',
+                          background: f.triage === 'TP' ? 'rgba(52,211,153,0.1)' : f.triage === 'FP' ? 'rgba(248,113,113,0.1)' : 'rgba(251,191,36,0.1)',
+                        }}>
+                          {f.triage === 'TP' ? '✓ TRUE POSITIVE' : f.triage === 'FP' ? '✗ FALSE POSITIVE' : '⋯ ' + f.triage}
+                        </span>
+                      </div>
+                      <p style={{ color: '#94a3b8', fontSize: 13, margin: 0 }}>{f.message}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

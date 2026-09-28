@@ -1,0 +1,14 @@
+FROM python:3.11-alpine
+
+# Create a non-root user for security
+RUN adduser -D sandboxuser
+
+# Install basic HTTP libraries likely needed for exploits
+RUN pip install --no-cache-dir requests urllib3
+
+# Switch to non-root user
+USER sandboxuser
+WORKDIR /home/sandboxuser
+
+# Default command
+CMD ["python3"]
