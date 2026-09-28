@@ -373,6 +373,28 @@ def health_auth():
     return {"status": "ok", "message": "Authenticated"}
 
 
+@app.get("/api/models", dependencies=[Security(require_api_key)])
+async def list_ollama_models():
+    """Return the models currently installed in the configured Ollama service."""
+    import urllib.request
+
+    ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    request = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
+
+    def fetch_models():
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read())
+
+    try:
+        payload = await asyncio.to_thread(fetch_models)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Ollama is unavailable. Check the Ollama service and try again.")
+
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    names = sorted({model.get("name") for model in models if isinstance(model, dict) and model.get("name")})
+    return {"models": names}
+
+
 @app.post("/api/scan", dependencies=[Security(require_api_key)])
 async def start_scan(request: ScanRequest):
     await _check_models_ready(request.model, request.challenger_model)

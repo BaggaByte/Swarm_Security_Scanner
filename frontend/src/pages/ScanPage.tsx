@@ -51,6 +51,12 @@ const DEFAULT_REPO: RepoScanConfig = {
   maxChunks: 20,
 };
 
+const MODEL_PRESETS = [
+  { id: 'llama3.2', label: 'Llama 3.2 · General purpose' },
+  { id: 'qwen2.5-coder:7b', label: 'Qwen 2.5 Coder 7B · Code-focused' },
+];
+const CUSTOM_MODEL = '__custom_model__';
+
 const SEV_COLORS: Record<string, string> = {
   CRITICAL: '#f87171', HIGH: '#fb923c', MEDIUM: '#fbbf24', LOW: '#a3e635', INFO: '#94a3b8',
 };
@@ -174,6 +180,80 @@ function extractMetrics(logs: LogEntry[]) {
   return m;
 }
 
+function ModelSelector({
+  label,
+  description,
+  value,
+  models,
+  modelsStatus,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: string;
+  models: string[];
+  modelsStatus: 'loading' | 'ready' | 'unavailable' | 'no_key';
+  disabled: boolean;
+  onChange: (model: string) => void;
+}) {
+  const recommended = new Set(MODEL_PRESETS.map(model => model.id));
+  const isCustom = value !== '' && !recommended.has(value) && !models.includes(value);
+  const selectValue = isCustom || value === '' ? CUSTOM_MODEL : value;
+  const installedModels = Array.from(new Set(models)).sort((a, b) => a.localeCompare(b));
+  const isInstalled = (model: string) => models.includes(model) || models.includes(`${model}:latest`);
+
+  return (
+    <div className="scan-field">
+      <label className="scan-label">{label}</label>
+      <select
+        className="scan-input"
+        value={selectValue}
+        onChange={event => onChange(event.target.value === CUSTOM_MODEL ? '' : event.target.value)}
+        disabled={disabled}
+      >
+        {installedModels.length > 0 && (
+          <optgroup label="Installed in Ollama">
+            {installedModels.map(model => <option key={model} value={model}>{model}</option>)}
+          </optgroup>
+        )}
+        <optgroup label="Recommended models">
+          {MODEL_PRESETS.map(model => (
+            <option key={model.id} value={model.id}>
+              {model.label}{isInstalled(model.id) ? '' : ' · install if needed'}
+            </option>
+          ))}
+        </optgroup>
+        {isCustom && <option value={value}>Current custom model · {value}</option>}
+        <option value={CUSTOM_MODEL}>Enter a custom model name…</option>
+      </select>
+      {(isCustom || value === '') && (
+        <input
+          className="scan-input"
+          type="text"
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          placeholder="Ollama model name, e.g. my-model:latest"
+          disabled={disabled}
+          aria-label={`${label} custom Ollama model name`}
+          style={{ marginTop: 8 }}
+        />
+      )}
+      <p className="scan-model-help">{description}</p>
+      {modelsStatus === 'loading' && <p className="scan-model-help">Loading models installed in Ollama…</p>}
+      {modelsStatus === 'ready' && models.length === 0 && (
+        <p className="scan-model-help">No installed models found. Choose a recommendation and install it in Ollama before scanning.</p>
+      )}
+      {modelsStatus === 'unavailable' && (
+        <p className="scan-model-help">Could not reach Ollama to list installed models. You can still choose a recommendation or enter a custom model.</p>
+      )}
+      {modelsStatus === 'no_key' && (
+        <p className="scan-model-help">Add your API key in Settings to load the models installed in Ollama.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 interface ScanPageProps {
@@ -197,6 +277,39 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
   const [elapsedTime, setElapsedTime] = useState(0);
   const [streamStatus, setStreamStatus] = useState<'idle' | 'connected' | 'error'>('idle');
   const { apiKey } = useStore();
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelsStatus, setModelsStatus] = useState<'loading' | 'ready' | 'unavailable' | 'no_key'>('loading');
+
+  useEffect(() => {
+    if (!apiKey) {
+      setAvailableModels([]);
+      setModelsStatus('no_key');
+      return;
+    }
+
+    const controller = new AbortController();
+    setModelsStatus('loading');
+    fetch(`${API}/api/models`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: controller.signal,
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error('Model list request failed');
+        return response.json();
+      })
+      .then(data => {
+        setAvailableModels(Array.isArray(data.models) ? data.models.filter((model: unknown): model is string => typeof model === 'string') : []);
+        setModelsStatus('ready');
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setAvailableModels([]);
+          setModelsStatus('unavailable');
+        }
+      });
+
+    return () => controller.abort();
+  }, [apiKey]);
 
   useEffect(() => {
     let interval: number;
@@ -501,27 +614,29 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
             {showAdvanced && (
               <div className="scan-advanced-content">
-                <div className="scan-field">
-                  <label className="scan-label">Discovery Model</label>
-                  <input className={inputCls} type="text"
-                    value={scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model}
-                    onChange={e => scanMode === 'sandbox'
-                      ? setSandboxConfig(c => ({ ...c, model: e.target.value }))
-                      : setRepoConfig(c => ({ ...c, model: e.target.value }))}
-                    disabled={running}
-                  />
-                </div>
+                <ModelSelector
+                  label="Discovery Model"
+                  description="Analyzes the repository and proposes findings. Llama 3.2 is the project default."
+                  value={scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model}
+                  models={availableModels}
+                  modelsStatus={modelsStatus}
+                  disabled={running}
+                  onChange={model => scanMode === 'sandbox'
+                    ? setSandboxConfig(config => ({ ...config, model }))
+                    : setRepoConfig(config => ({ ...config, model }))}
+                />
 
-                <div className="scan-field">
-                  <label className="scan-label">Challenger Model</label>
-                  <input className={inputCls} type="text"
-                    value={scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel}
-                    onChange={e => scanMode === 'sandbox'
-                      ? setSandboxConfig(c => ({ ...c, challengerModel: e.target.value }))
-                      : setRepoConfig(c => ({ ...c, challengerModel: e.target.value }))}
-                    disabled={running}
-                  />
-                </div>
+                <ModelSelector
+                  label="Challenger Model"
+                  description="Reviews and challenges proposed findings. Qwen 2.5 Coder 7B is the project default."
+                  value={scanMode === 'sandbox' ? sandboxConfig.challengerModel : repoConfig.challengerModel}
+                  models={availableModels}
+                  modelsStatus={modelsStatus}
+                  disabled={running}
+                  onChange={model => scanMode === 'sandbox'
+                    ? setSandboxConfig(config => ({ ...config, challengerModel: model }))
+                    : setRepoConfig(config => ({ ...config, challengerModel: model }))}
+                />
 
                 <div className="scan-field">
                   <label className="scan-label">Workers ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
