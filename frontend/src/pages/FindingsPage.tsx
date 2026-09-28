@@ -116,6 +116,7 @@ function FindingDetail({ finding: f, onClose, onStatusChange, onOwnerChange, onR
           file_path: f.file,
           description: f.description,
           code_snippet: f.codeSnippet || 'Unknown',
+          target_url: 'http://sandbox-target:5000'
         })
       });
       if (!res.ok) throw new Error(await res.text() || res.statusText);

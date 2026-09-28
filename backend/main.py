@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import signal
 import subprocess
 import sys
