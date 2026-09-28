@@ -38,6 +38,34 @@ from .security import (
 )
 from . import database as db
 
+async def _check_models_ready(model: str, challenger_model: str):
+    import urllib.request
+    import urllib.error
+    ollama_url = os.environ.get("OLLAMA_URL")
+    if not ollama_url:
+        return
+    try:
+        req = urllib.request.Request(f"{ollama_url}/api/tags")
+        def fetch():
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                return json.loads(resp.read())
+        data = await asyncio.to_thread(fetch)
+        models = [m.get("name") for m in data.get("models", [])]
+        missing = []
+        for required in (model, challenger_model):
+            if required and not any(m == required or m.startswith(f"{required}:") for m in models):
+                missing.append(required)
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Required models not found in Ollama: {', '.join(missing)}. Please run 'docker compose exec ollama ollama pull <model>' first.",
+            )
+    except urllib.error.URLError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ollama service is unreachable. Ensure the ollama container is running."
+        )
+
 # ---------------------------------------------------------------------------
 # Concurrency & State Management
 # ---------------------------------------------------------------------------
@@ -348,6 +376,7 @@ def health_auth():
 
 @app.post("/api/scan", dependencies=[Security(require_api_key)])
 async def start_scan(request: ScanRequest):
+    await _check_models_ready(request.model, request.challenger_model)
     # Check concurrent scans limit
     active_count = sum(1 for s in _runs.values() if s.status == "running")
     if active_count >= MAX_CONCURRENT_SCANS:
@@ -375,6 +404,7 @@ async def start_scan(request: ScanRequest):
 
 @app.post("/api/repo-scan", dependencies=[Security(require_api_key)])
 async def start_repo_scan(request: RepoScanRequest):
+    await _check_models_ready(request.model, request.challenger_model)
     # Validate scan boundary & SSRF protection
     validated_repo = validate_scan_target(request.repo)
     request.repo = validated_repo

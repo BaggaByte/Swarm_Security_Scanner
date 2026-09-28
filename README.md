@@ -111,6 +111,10 @@ cp .env.example .env
 
 # 2. Build and launch with Docker Compose
 docker compose -f docker-compose.prod.yml up --build -d
+
+# 3. Initialize Ollama models
+docker compose -f docker-compose.prod.yml exec ollama ollama pull llama3.2
+docker compose -f docker-compose.prod.yml exec ollama ollama pull qwen2.5-coder:7b
 ```
 
 The production server starts on `http://localhost:8000` with a single Uvicorn worker (to prevent in-memory state conflicts) and static asset serving. The compose stack also includes an embedded Ollama service for local LLM inference.

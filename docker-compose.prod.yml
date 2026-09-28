@@ -8,7 +8,7 @@ services:
     image: swarm-security-scanner:prod
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - SWARM_API_KEY=${SWARM_API_KEY}
       - SWARM_ALLOW_ANONYMOUS=false
@@ -32,6 +32,7 @@ services:
           memory: 4G
     networks:
       - swarm-internal
+      - docker-net
 
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
@@ -44,7 +45,7 @@ services:
       POST: 1
       DELETE: 1
     networks:
-      - swarm-internal
+      - docker-net
     security_opt:
       - no-new-privileges:true
 
@@ -85,6 +86,9 @@ volumes:
 networks:
   swarm-internal:
     driver: bridge
+  docker-net:
+    driver: bridge
+    internal: true
   sandbox-net:
     driver: bridge
     internal: true
