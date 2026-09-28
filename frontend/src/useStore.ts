@@ -35,7 +35,7 @@ const listeners = new Set<() => void>();
 function fetchState() {
   if (!state.apiKey) return;
   const headers = { Authorization: `Bearer ${state.apiKey}` };
-  const api = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+  const api = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
   Promise.all([
     fetch(`${api}/api/findings`, { headers }).then(r => r.ok ? r.json() : []),
     fetch(`${api}/api/repositories`, { headers }).then(r => r.ok ? r.json() : []),
@@ -55,7 +55,7 @@ function setState(newState: Partial<StoreState>) {
     writeLS('ag_api_key', state.apiKey);
     fetchState();
   } else if (isSynced && state.apiKey) {
-    const api = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+    const api = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
     const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${state.apiKey}` };
     if ('findings' in newState) {
       fetch(`${api}/api/findings`, { method: 'POST', headers, body: JSON.stringify(state.findings) });

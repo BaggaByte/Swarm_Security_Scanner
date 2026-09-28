@@ -23,7 +23,7 @@ import { useStore } from '../useStore';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
 
 const LOG_TYPE_ICON: Record<LogType, string> = {
   PHASE: '⬡', WORKER: '◈', CHALLENGER: '⚔', VERDICT: '◎',
@@ -52,8 +52,11 @@ const DEFAULT_REPO: RepoScanConfig = {
 };
 
 const MODEL_PRESETS = [
-  { id: 'llama3.2', label: 'Llama 3.2 · General purpose' },
-  { id: 'qwen2.5-coder:7b', label: 'Qwen 2.5 Coder 7B · Code-focused' },
+  { id: 'llama3.2', label: 'Llama 3.2 (Local Ollama)' },
+  { id: 'qwen2.5-coder:7b', label: 'Qwen 2.5 Coder 7B (Local Ollama)' },
+  { id: 'groq/llama-3.1-8b-instant', label: 'Llama 3.1 8B (Groq)' },
+  { id: 'groq/llama3-8b-8192', label: 'Llama 3 8B (Groq)' },
+  { id: 'groq/llama-3.2-11b-vision-preview', label: 'Llama 3.2 11B (Groq)' },
 ];
 const CUSTOM_MODEL = '__custom_model__';
 

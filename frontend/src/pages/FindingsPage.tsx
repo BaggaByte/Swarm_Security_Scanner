@@ -108,7 +108,7 @@ function FindingDetail({ finding: f, onClose, onStatusChange, onOwnerChange, onR
     setIsVerifying(true);
     setExploitError(null);
     try {
-      const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+      const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
       const res = await fetch(`${API}/api/verify`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -133,7 +133,7 @@ function FindingDetail({ finding: f, onClose, onStatusChange, onOwnerChange, onR
     setIsFixing(true);
     setRemediationError(null);
     try {
-      const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+      const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
       const res = await fetch(`${API}/api/remediate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({

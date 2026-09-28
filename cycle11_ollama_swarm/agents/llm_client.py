@@ -131,7 +131,8 @@ class LLMClient:
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.groq_api_key}"
+                "Authorization": f"Bearer {self.groq_api_key}",
+                "User-Agent": "Swarm-Security-Scanner/1.0"
             },
             method="POST",
         )
@@ -139,6 +140,9 @@ class LLMClient:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read())
                 return data["choices"][0]["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode('utf-8', errors='replace')
+            raise RuntimeError(f"Groq API HTTP {e.code}: {err_body}") from e
         except Exception as e:
             raise RuntimeError(f"Groq API chat call failed: {e}") from e
 
