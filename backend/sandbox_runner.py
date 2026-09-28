@@ -22,6 +22,7 @@ except ImportError:
 
 def run_exploit_in_sandbox(
     exploit_code: str,
+    finding_id: str,
     target_url: str = "http://localhost:5000",
     timeout_seconds: int = 10,
     allow_network: bool = False,
@@ -75,7 +76,7 @@ def run_exploit_in_sandbox(
             exit_code = -1
 
         logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
-        success = (exit_code == 0) and ("error" not in logs.lower() and "exception" not in logs.lower())
+        success = (exit_code == 0) and (f"EXPLOIT_SUCCESS:{finding_id}" in logs)
         return success, logs
 
     except Exception as e:

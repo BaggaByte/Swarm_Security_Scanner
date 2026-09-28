@@ -246,13 +246,14 @@ async def _run_swarm(run_id: str, req: ScanRequest, loop: asyncio.AbstractEventL
             process.stdout.close()
             process.wait()
             exit_code = process.returncode
+            event_type = "DONE" if exit_code == 0 else "ERROR"
             done_payload = json.dumps({
-                "type": "DONE",
+                "type": event_type,
                 "agent": "runner",
                 "content": f"Swarm finished — exit code {exit_code}",
                 "exit_code": exit_code,
             })
-            db.append_log(run_id, "DONE", "runner", done_payload)
+            db.append_log(run_id, event_type, "runner", done_payload)
             db.update_run_status(run_id, "done" if exit_code == 0 else "error", exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
             state.status = "done" if exit_code == 0 else "error"
@@ -289,10 +290,7 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
         "--max-chunks", str(req.max_chunks),
     ]
     if req.sarif_file:
-        safe_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "uploads"))
         sarif_path = os.path.abspath(req.sarif_file)
-        if not sarif_path.startswith(safe_dir) or not sarif_path.endswith(".sarif"):
-            raise HTTPException(status_code=400, detail="sarif_file must be a .sarif file inside the uploads directory")
         cmd.extend(["--sarif-file", sarif_path])
     
     if req.no_sast:
@@ -340,12 +338,13 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
             process.stdout.close()
             process.wait()
             exit_code = process.returncode
+            event_type = "DONE" if exit_code == 0 else "ERROR"
             done_payload = json.dumps({
-                "type": "DONE", "agent": "runner",
+                "type": event_type, "agent": "runner",
                 "content": f"Real-world scan finished — exit code {exit_code}",
                 "exit_code": exit_code,
             })
-            db.append_log(run_id, "DONE", "runner", done_payload)
+            db.append_log(run_id, event_type, "runner", done_payload)
             db.update_run_status(run_id, "done" if exit_code == 0 else "error", exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
             state.status = "done" if exit_code == 0 else "error"
@@ -409,6 +408,12 @@ async def start_repo_scan(request: RepoScanRequest):
     validated_repo = validate_scan_target(request.repo)
     request.repo = validated_repo
 
+    if request.sarif_file:
+        safe_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "uploads"))
+        sarif_path = os.path.abspath(request.sarif_file)
+        if not sarif_path.startswith(safe_dir + os.sep) or not sarif_path.endswith(".sarif"):
+            raise HTTPException(status_code=400, detail="sarif_file must be a .sarif file inside the uploads directory")
+
     active_count = sum(1 for s in _runs.values() if s.status == "running")
     if active_count >= MAX_CONCURRENT_SCANS:
         raise HTTPException(
@@ -455,6 +460,33 @@ def get_run(run_id: str):
     if db_run:
         return db_run
     raise HTTPException(status_code=404, detail="Run not found")
+
+@app.get("/api/findings", dependencies=[Security(require_api_key)])
+def get_findings():
+    return db.list_findings()
+
+@app.post("/api/findings", dependencies=[Security(require_api_key)])
+def post_findings(findings: List[Dict[str, Any]]):
+    db.save_findings(findings)
+    return {"status": "ok"}
+
+@app.get("/api/repositories", dependencies=[Security(require_api_key)])
+def get_repositories():
+    return db.list_repositories()
+
+@app.post("/api/repositories", dependencies=[Security(require_api_key)])
+def post_repositories(repos: List[Dict[str, Any]]):
+    db.save_repositories(repos)
+    return {"status": "ok"}
+
+@app.get("/api/frontend_runs", dependencies=[Security(require_api_key)])
+def get_frontend_runs():
+    return db.list_frontend_runs()
+
+@app.post("/api/frontend_runs", dependencies=[Security(require_api_key)])
+def post_frontend_runs(runs: List[Dict[str, Any]]):
+    db.save_frontend_runs(runs)
+    return {"status": "ok"}
 
 
 async def _event_stream(run_id: str) -> AsyncGenerator[str, None]:
@@ -600,7 +632,9 @@ async def verify_exploitability(req: VerifyRequest):
         f"Description: {req.description}\n\n"
         f"Code Snippet:\n```\n{req.code_snippet}\n```\n\n"
         f"The target application is running at {validated_target}.\n"
-        f"Output ONLY the python code using the requests library. No markdown wrapping."
+        f"Your script MUST print exactly 'EXPLOIT_SUCCESS:{req.finding_id}' to stdout if the exploit succeeds.\n"
+        f"You MUST verify the vulnerability by checking the response for specific evidence (e.g. leaked data). Do not print the success string unconditionally.\n"
+        f"Output ONLY the python code using the requests or urllib library. No markdown wrapping."
     )
     
     payload = json.dumps({
@@ -637,6 +671,7 @@ async def verify_exploitability(req: VerifyRequest):
         def run_sandbox_sync():
             return run_exploit_in_sandbox(
                 exploit_code,
+                req.finding_id,
                 target_url=validated_target,
                 allow_network=True,
             )

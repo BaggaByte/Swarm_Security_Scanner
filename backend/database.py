@@ -99,6 +99,52 @@ def init_db():
                         updated_at REAL NOT NULL
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS findings (
+                        id TEXT PRIMARY KEY,
+                        repository TEXT NOT NULL,
+                        file TEXT NOT NULL,
+                        line INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        cwe TEXT,
+                        owasp TEXT,
+                        status TEXT NOT NULL,
+                        owner TEXT,
+                        ai_verdict TEXT NOT NULL,
+                        swarm_rationale TEXT NOT NULL,
+                        code_snippet TEXT,
+                        exploit_path TEXT,
+                        exploit_verified INTEGER,
+                        exploit_output TEXT,
+                        remediation_suggestion TEXT,
+                        tool TEXT NOT NULL,
+                        rule_id TEXT NOT NULL,
+                        first_detected REAL NOT NULL,
+                        last_detected REAL NOT NULL,
+                        scan_id TEXT NOT NULL,
+                        fixed_at REAL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS repositories (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        last_scanned REAL,
+                        open_findings INTEGER NOT NULL,
+                        critical_count INTEGER NOT NULL,
+                        high_count INTEGER NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS frontend_runs (
+                        id TEXT PRIMARY KEY,
+                        run_json TEXT NOT NULL
+                    )
+                """)
         finally:
             _release_connection(conn)
 
@@ -256,6 +302,113 @@ def get_architecture(repo_url: str) -> Optional[str]:
                     pass
                 return raw
             return None
+        finally:
+            _release_connection(conn)
+
+def save_findings(findings: List[Dict[str, Any]]):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM findings")
+                for f in findings:
+                    conn.execute("""
+                        INSERT INTO findings (
+                            id, repository, file, line, title, description, severity,
+                            cwe, owasp, status, owner, ai_verdict, swarm_rationale,
+                            code_snippet, exploit_path, exploit_verified, exploit_output,
+                            remediation_suggestion, tool, rule_id, first_detected,
+                            last_detected, scan_id, fixed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        f.get("id"), f.get("repository"), f.get("file"), f.get("line"),
+                        f.get("title"), f.get("description"), f.get("severity"),
+                        f.get("cwe"), f.get("owasp"), f.get("status"), f.get("owner"),
+                        f.get("aiVerdict"), f.get("swarmRationale"), f.get("codeSnippet"),
+                        f.get("exploitPath"), 1 if f.get("exploitVerified") else 0,
+                        f.get("exploitOutput"), f.get("remediationSuggestion"),
+                        f.get("tool"), f.get("ruleId"), f.get("firstDetected"),
+                        f.get("lastDetected"), f.get("scanId"), f.get("fixedAt")
+                    ))
+        finally:
+            _release_connection(conn)
+
+def list_findings() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM findings")
+            res = []
+            for row in cur.fetchall():
+                d = dict(row)
+                res.append({
+                    "id": d["id"], "repository": d["repository"], "file": d["file"], "line": d["line"],
+                    "title": d["title"], "description": d["description"], "severity": d["severity"],
+                    "cwe": d["cwe"], "owasp": d["owasp"], "status": d["status"], "owner": d["owner"],
+                    "aiVerdict": d["ai_verdict"], "swarmRationale": d["swarm_rationale"],
+                    "codeSnippet": d["code_snippet"], "exploitPath": d["exploit_path"],
+                    "exploitVerified": bool(d["exploit_verified"]), "exploitOutput": d["exploit_output"],
+                    "remediationSuggestion": d["remediation_suggestion"], "tool": d["tool"],
+                    "ruleId": d["rule_id"], "firstDetected": d["first_detected"],
+                    "lastDetected": d["last_detected"], "scanId": d["scan_id"], "fixedAt": d["fixed_at"]
+                })
+            return res
+        finally:
+            _release_connection(conn)
+
+def save_repositories(repos: List[Dict[str, Any]]):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM repositories")
+                for r in repos:
+                    conn.execute("""
+                        INSERT INTO repositories (
+                            id, name, url, type, last_scanned, open_findings, critical_count, high_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        r.get("id"), r.get("name"), r.get("url"), r.get("type"),
+                        r.get("lastScanned"), r.get("openFindings", 0),
+                        r.get("criticalCount", 0), r.get("highCount", 0)
+                    ))
+        finally:
+            _release_connection(conn)
+
+def list_repositories() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM repositories")
+            res = []
+            for row in cur.fetchall():
+                d = dict(row)
+                res.append({
+                    "id": d["id"], "name": d["name"], "url": d["url"], "type": d["type"],
+                    "lastScanned": d["last_scanned"], "openFindings": d["open_findings"],
+                    "criticalCount": d["critical_count"], "highCount": d["high_count"]
+                })
+            return res
+        finally:
+            _release_connection(conn)
+
+def save_frontend_runs(runs: List[Dict[str, Any]]):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM frontend_runs")
+                for r in runs:
+                    conn.execute("INSERT INTO frontend_runs (id, run_json) VALUES (?, ?)", (r.get("id"), json.dumps(r)))
+        finally:
+            _release_connection(conn)
+
+def list_frontend_runs() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT run_json FROM frontend_runs")
+            return [json.loads(row["run_json"]) for row in cur.fetchall()]
         finally:
             _release_connection(conn)
 

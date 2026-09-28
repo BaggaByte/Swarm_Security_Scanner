@@ -32,6 +32,7 @@ export interface Finding {
   firstDetected: number;
   lastDetected: number;
   scanId: string;
+  fixedAt?: number;
 }
 
 // ── Scan Run ─────────────────────────────────────────────────────────────────

@@ -115,6 +115,8 @@ BLOCKED_NETWORKS = [
 def is_ip_blocked(ip_addr: str) -> bool:
     try:
         ip = ipaddress.ip_address(ip_addr)
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         for net in BLOCKED_NETWORKS:
             if ip in net:
                 return True

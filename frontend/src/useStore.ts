@@ -22,20 +22,51 @@ type StoreState = {
 };
 
 let state: StoreState = {
-  findings: readLS('ag_findings', []),
-  scanRuns: readLS('ag_scan_runs', []),
-  repositories: readLS('ag_repos', []),
+  findings: [],
+  scanRuns: [],
+  repositories: [],
   apiKey: readLS('ag_api_key', ''),
 };
 
+let isSynced = false;
+
 const listeners = new Set<() => void>();
+
+function fetchState() {
+  if (!state.apiKey) return;
+  const headers = { Authorization: `Bearer ${state.apiKey}` };
+  const api = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+  Promise.all([
+    fetch(`${api}/api/findings`, { headers }).then(r => r.ok ? r.json() : []),
+    fetch(`${api}/api/repositories`, { headers }).then(r => r.ok ? r.json() : []),
+    fetch(`${api}/api/frontend_runs`, { headers }).then(r => r.ok ? r.json() : [])
+  ]).then(([findings, repos, runs]) => {
+    state = { ...state, findings, repositories: repos, scanRuns: runs };
+    isSynced = true;
+    listeners.forEach(l => l());
+  }).catch(() => {});
+}
+
+fetchState();
 
 function setState(newState: Partial<StoreState>) {
   state = { ...state, ...newState };
-  if ('findings' in newState) writeLS('ag_findings', state.findings);
-  if ('scanRuns' in newState) writeLS('ag_scan_runs', state.scanRuns);
-  if ('repositories' in newState) writeLS('ag_repos', state.repositories);
-  if ('apiKey' in newState) writeLS('ag_api_key', state.apiKey);
+  if ('apiKey' in newState) {
+    writeLS('ag_api_key', state.apiKey);
+    fetchState();
+  } else if (isSynced && state.apiKey) {
+    const api = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${state.apiKey}` };
+    if ('findings' in newState) {
+      fetch(`${api}/api/findings`, { method: 'POST', headers, body: JSON.stringify(state.findings) });
+    }
+    if ('repositories' in newState) {
+      fetch(`${api}/api/repositories`, { method: 'POST', headers, body: JSON.stringify(state.repositories) });
+    }
+    if ('scanRuns' in newState) {
+      fetch(`${api}/api/frontend_runs`, { method: 'POST', headers, body: JSON.stringify(state.scanRuns) });
+    }
+  }
   listeners.forEach(l => l());
 }
 
@@ -53,7 +84,7 @@ export function useStore() {
 
   const addFinding = useCallback((f: Finding) => {
     const prev = state.findings;
-    const idx = prev.findIndex(x => x.file === f.file && x.line === f.line && x.ruleId === f.ruleId);
+    const idx = prev.findIndex(x => x.repository === f.repository && x.file === f.file && x.line === f.line && x.ruleId === f.ruleId);
     if (idx >= 0) {
       const updated = [...prev];
       updated[idx] = { ...updated[idx], lastDetected: f.lastDetected, scanId: f.scanId };
@@ -66,7 +97,7 @@ export function useStore() {
   const addFindings = useCallback((fs: Finding[]) => {
     const next = [...state.findings];
     for (const f of fs) {
-      const idx = next.findIndex(x => x.file === f.file && x.line === f.line && x.ruleId === f.ruleId);
+      const idx = next.findIndex(x => x.repository === f.repository && x.file === f.file && x.line === f.line && x.ruleId === f.ruleId);
       if (idx >= 0) {
         next[idx] = { ...next[idx], lastDetected: f.lastDetected, scanId: f.scanId };
       } else {
@@ -77,7 +108,15 @@ export function useStore() {
   }, []);
 
   const updateFindingStatus = useCallback((id: string, status: Finding['status']) => {
-    setState({ findings: state.findings.map(f => f.id === id ? { ...f, status } : f) });
+    setState({ findings: state.findings.map(f => {
+      if (f.id === id) {
+        const updates: Partial<Finding> = { status };
+        if (status === 'fixed' && f.status !== 'fixed') updates.fixedAt = Date.now();
+        else if (status !== 'fixed') updates.fixedAt = undefined;
+        return { ...f, ...updates };
+      }
+      return f;
+    }) });
   }, []);
 
   const updateFindingOwner = useCallback((id: string, owner: string) => {

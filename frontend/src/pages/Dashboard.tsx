@@ -66,7 +66,7 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
   const high = open.filter(f => f.severity === 'HIGH');
   const now = Date.now();
   const oneWeek = 7 * 24 * 60 * 60 * 1000;
-  const fixedThisWeek = findings.filter(f => f.status === 'fixed' && now - f.lastDetected < oneWeek);
+  const fixedThisWeek = findings.filter(f => f.status === 'fixed' && f.fixedAt && (now - f.fixedAt < oneWeek));
   const fpCount = findings.filter(f => f.aiVerdict === 'FP').length;
   const fpRate = findings.length > 0 ? ((fpCount / findings.length) * 100).toFixed(1) : '0.0';
 
@@ -98,7 +98,7 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
       days.push({
         day: new Date(start).toLocaleDateString('en', { weekday: 'short' }),
         new: findings.filter(f => f.firstDetected >= start && f.firstDetected < end).length,
-        fixed: findings.filter(f => f.status === 'fixed' && f.lastDetected >= start && f.lastDetected < end).length,
+        fixed: findings.filter(f => f.status === 'fixed' && f.fixedAt && f.fixedAt >= start && f.fixedAt < end).length,
         fp: findings.filter(f => f.aiVerdict === 'FP' && f.firstDetected >= start && f.firstDetected < end).length,
       });
     }
