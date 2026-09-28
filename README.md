@@ -23,6 +23,7 @@
 
 - [What Changed — The Real-World Pivot](#what-changed--the-real-world-pivot)
 - [Overview](#overview)
+- [Roadmap to Limited Beta](#roadmap-to-limited-beta)
 - [Quick Start](#quick-start)
 - [Two Operating Modes](#two-operating-modes)
 - [Full Architecture](#full-architecture)
@@ -62,7 +63,12 @@ This version makes the following critical upgrades to address those gaps:
 
 ## Overview
 
-The **Antigravity Swarm Security Scanner** orchestrates multiple local LLMs (via Ollama) in a structured multi-phase pipeline to audit source code for security vulnerabilities. It operates in two modes:
+The **Antigravity Swarm Security Scanner** orchestrates multiple local LLMs (via Ollama) in a structured multi-phase pipeline to audit source code for security vulnerabilities. 
+
+> [!NOTE]
+> **Product Positioning:** This tool is designed as an **AI-assisted security triage for human reviewers**, rather than an authoritative standalone security gate. It aims to reduce alert fatigue by triaging SAST output and highlighting complex logical flows, allowing human engineers to verify findings efficiently.
+
+It operates in two modes:
 
 **Real-World Mode** — For analysing real repositories. The platform:
 1. Clones or walks any repository (multi-language)
@@ -72,6 +78,15 @@ The **Antigravity Swarm Security Scanner** orchestrates multiple local LLMs (via
 5. Reports Precision, Recall, F1, Delta-vs-SAST, and token efficiency metrics
 
 **Sandbox Mode** — For research experiments. The platform runs 12 validated experiment cycles (11–22) on a controlled benchmark with planted ground-truth flaws, using a 6-axis adversarial challenger rubric to evaluate LLM security audit quality.
+
+### Roadmap to Limited Beta
+
+As the product matures toward an enterprise-ready limited beta, development is prioritized around four key pillars:
+
+1. **Make findings auditable:** Include reproducible evidence for each finding (commit, file/line, code context, SAST output, versions). Require human review before treating a finding as confirmed.
+2. **Make results repeatable:** Pin model and scanner versions, record inference settings, and evaluate precision and recall across representative codebases.
+3. **Make operation predictable:** Automate model setup, report resource needs, filter generated/vendor code, and handle large repositories with clear limits and progress reporting.
+4. **Add team features:** Post-beta, introduce queued jobs, RBAC, ownership, audit logs, exports, and CI/CD integrations for team adoption.
 
 ---
 
