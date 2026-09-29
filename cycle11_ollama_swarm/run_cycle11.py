@@ -463,6 +463,11 @@ _ALL_GT_PATTERNS = [p for gt in CYCLE13A_GROUND_TRUTH for p in gt["patterns"]]
 
 def _finding_matches_any_gt(finding: dict) -> tuple[bool, str | None]:
     """Return (matches, gt_id) — whether this finding touches a known planted issue."""
+    explicit_gt_id = finding.get("ground_truth_id")
+    known_gt_ids = {gt["id"] for gt in CYCLE13A_GROUND_TRUTH}
+    if explicit_gt_id in known_gt_ids:
+        return True, explicit_gt_id
+
     text = f"{finding.get('hypothesis', '')} {finding.get('evidence', '')}".lower()
     for gt in CYCLE13A_GROUND_TRUTH:
         if any(p in text for p in gt["patterns"]):
@@ -710,10 +715,6 @@ def run_cycle19_verdict_aggregation(conn) -> dict:
             )
             counts["static_confirmed"] += 1
             counts["confirmed"] += 1
-            counts["full_validity"] += 1
-            counts["factual_valid"] += 1
-            counts["attack_path_valid"] += 1
-            counts["security_property_valid"] += 1
             continue
 
         # LLM findings

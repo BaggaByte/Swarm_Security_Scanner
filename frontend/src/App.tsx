@@ -292,7 +292,7 @@ export default function App() {
                   onClick={async () => {
                     setTestStatus('testing');
                     try {
-                      const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
+                      const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8001' : '';
                       const res = await fetch(`${API}/api/health/auth`, { headers: { 'Authorization': `Bearer ${store.apiKey}` }});
                       setTestStatus(res.ok ? 'success' : 'error');
                     } catch {

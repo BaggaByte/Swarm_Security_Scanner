@@ -82,7 +82,7 @@ export default function ArchitecturePage() {
     if (!selectedRepo || !apiKey) return;
     setLoading(true);
     setError(null);
-    const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8000' : '';
+    const API = window.location.origin.includes('localhost:5173') ? 'http://localhost:8001' : '';
     fetch(`${API}/api/architecture?repo=${encodeURIComponent(selectedRepo)}`, {
       headers: { 'Authorization': `Bearer ${apiKey}` }
     })

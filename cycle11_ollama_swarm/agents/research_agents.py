@@ -748,7 +748,7 @@ class ChallengerAgent:
         Cycle 19/20: decomposed 6-axis evaluation.
         Cycle 16-18: evidence-first 3-way review.
         """
-        if cycle_key in ("19", "20", "21"):
+        if cycle_key in ("19", "20", "21", "22"):
             prompt = textwrap.dedent(f"""\
                 === ORIGINAL SOURCE CODE ===
                 {source_code}
@@ -813,7 +813,7 @@ class ChallengerAgent:
         if not response:
             return {"verdict": "inconclusive", "raw_verdict": None, "reasoning": "Empty response from LLM"}
 
-        if cycle_key in ("19", "20", "21"):
+        if cycle_key in ("19", "20", "21", "22"):
             return _parse_cycle19_challenge(response)
 
         lines = response.strip().splitlines()

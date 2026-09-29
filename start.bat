@@ -1,7 +1,7 @@
 @echo off
 REM ─────────────────────────────────────────────────────────────────
 REM  Swarm Security Scanner — Full Stack Launcher
-REM  Starts: FastAPI backend (port 8000) + Vite dev server (port 5173)
+REM  Starts: FastAPI backend (port 8001) + Vite dev server (port 5173)
 REM ─────────────────────────────────────────────────────────────────
 
 echo.
@@ -46,8 +46,8 @@ echo  [OK]   Python deps ready.
 echo.
 
 REM ─── Launch Backend ───
-echo [3/3] Starting FastAPI backend on http://localhost:8000 ...
-start "Swarm-Backend" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn backend.main:app --reload --port 8000 --log-level info"
+echo [3/3] Starting FastAPI backend on http://localhost:8001 ...
+start "Swarm-Backend" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn backend.main:app --reload --port 8001 --log-level info"
 
 timeout /t 2 >nul
 
@@ -60,9 +60,9 @@ timeout /t 3 >nul
 echo.
 echo ✓  Both servers are starting up.
 echo.
-echo    Backend:   http://localhost:8000
+echo    Backend:   http://localhost:8001
 echo    Frontend:  http://localhost:5173
-echo    API Docs:  http://localhost:8000/docs
+echo    API Docs:  http://localhost:8001/docs
 echo.
 echo    Open http://localhost:5173 in your browser to use the dashboard.
 echo    Press any key to open it now...

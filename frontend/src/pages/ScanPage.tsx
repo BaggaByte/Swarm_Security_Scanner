@@ -23,7 +23,10 @@ import { useStore } from '../useStore';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const API = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : '';
+const API = (
+  import.meta.env.VITE_API_URL ||
+  (window.location.port === '5173' ? 'http://127.0.0.1:8001' : '')
+).replace(/\/+$/, '');
 
 const LOG_TYPE_ICON: Record<LogType, string> = {
   PHASE: '⬡', WORKER: '◈', CHALLENGER: '⚔', VERDICT: '◎',
@@ -54,9 +57,9 @@ const DEFAULT_REPO: RepoScanConfig = {
 const MODEL_PRESETS = [
   { id: 'llama3.2', label: 'Llama 3.2 (Local Ollama)' },
   { id: 'qwen2.5-coder:7b', label: 'Qwen 2.5 Coder 7B (Local Ollama)' },
-  { id: 'groq/llama-3.1-8b-instant', label: 'Llama 3.1 8B (Groq)' },
-  { id: 'groq/llama3-8b-8192', label: 'Llama 3 8B (Groq)' },
-  { id: 'groq/llama-3.2-11b-vision-preview', label: 'Llama 3.2 11B (Groq)' },
+  { id: 'groq/openai/gpt-oss-120b', label: 'GPT OSS 120B (Groq)' },
+  { id: 'groq/qwen/qwen3.8-27b', label: 'Qwen 3.8 27B (Groq)' },
+  { id: 'groq/openai/gpt-oss-20b', label: 'GPT OSS 20B (Groq)' },
 ];
 const CUSTOM_MODEL = '__custom_model__';
 
@@ -565,6 +568,24 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
     return { findings: triageFindings.length, verdicts, confirmed, refuted };
   }, [triageFindings]);
 
+  const handleExportReport = useCallback(() => {
+    const report = {
+      runId,
+      scanMode,
+      config: scanMode === 'sandbox' ? sandboxConfig : repoConfig,
+      stats: liveStats,
+      triageFindings,
+      logs,
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `swarm-scan-report-${runId || 'export'}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [runId, scanMode, sandboxConfig, repoConfig, liveStats, triageFindings, logs]);
+
   const inputCls = 'scan-input';
 
   return (
@@ -762,6 +783,14 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
                 {t.label}
               </button>
             ))}
+            <button
+              className="scan-tab"
+              style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, color: '#38bdf8' }}
+              onClick={handleExportReport}
+              disabled={logs.length === 0}
+            >
+              <Share2 size={13} /> Export Report
+            </button>
           </div>
 
           {/* Agent Graph */}
