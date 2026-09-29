@@ -167,7 +167,7 @@ class RepoScanRequest(BaseModel):
     challengers: int = Field(default=2, ge=1, le=2)
     sast_tools: list[str] = Field(default=["bandit", "semgrep"])
     no_sast: bool = Field(default=False)
-    max_chunks: int = Field(default=20, ge=0, le=1000, description="Discovery chunk limit; 0 scans all eligible chunks")
+    max_chunks: int = Field(default=0, ge=0, le=1000, description="Discovery chunk limit; 0 scans all eligible chunks")
     sarif_file: Optional[str] = Field(default=None, description="Path to a SARIF file to ingest")
 
 class FeedbackRequest(BaseModel):

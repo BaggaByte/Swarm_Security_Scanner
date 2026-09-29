@@ -454,9 +454,11 @@ Interactive docs: **http://localhost:8000/docs**
   "sast_tools": ["bandit", "semgrep"],
   "sarif_file": "path/to/report.sarif",
   "no_sast": false,
-  "max_chunks": 20
+  "max_chunks": 0
 }
 ```
+
+`max_chunks: 0` scans all eligible discovery chunks. Set a positive limit for a faster partial scan; the run reports limited coverage in its status and metadata.
 
 **Response:** `{ "status": "started", "run_id": "...", "scan_type": "real_world" }`
 
@@ -599,7 +601,7 @@ class RepoScanRequest(BaseModel):
     challengers:      int            # 1–2
     sast_tools:       list[str]      # ["bandit", "semgrep"]
     no_sast:          bool           # skip SAST entirely
-    max_chunks:       int            # 5–100 chunks per agent
+    max_chunks:       int            # 0 = all eligible chunks; positive values limit discovery coverage
 ```
 
 ### Structured Output Protocol

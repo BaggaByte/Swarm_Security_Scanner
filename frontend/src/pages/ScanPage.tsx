@@ -48,7 +48,7 @@ const DEFAULT_REPO: RepoScanConfig = {
   challengers: 2,
   sastTools: ['bandit', 'semgrep'],
   noSast: false,
-  maxChunks: 20,
+  maxChunks: 0,
 };
 
 const MODEL_PRESETS = [

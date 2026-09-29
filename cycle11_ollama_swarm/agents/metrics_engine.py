@@ -86,6 +86,7 @@ class RunMetrics:
     swarm_confirmed: int = 0        # After challenger consensus
     swarm_partial: int = 0
     swarm_refuted: int = 0
+    swarm_inconclusive: int = 0
 
     # ---- Comparative metrics ----
     delta_vs_sast: int = 0          # Swarm-confirmed findings NOT in SAST output
@@ -175,6 +176,7 @@ class RunMetrics:
             f"  Confirmed:             {self.swarm_confirmed}",
             f"  Partial:               {self.swarm_partial}",
             f"  Refuted:               {self.swarm_refuted}",
+            f"  Inconclusive:          {self.swarm_inconclusive}",
             f"  ── Delta Analysis ────────────────────────────────────",
             f"  Novel Swarm findings (not in SAST):  {self.delta_vs_sast}",
             f"  SAST false positives eliminated:     {self.sast_false_positives_found}",
@@ -247,14 +249,16 @@ class MetricsEngine:
 
     def record_verdict(self, verdict: str, finding: dict):
         """Record a final verdict for a finding."""
-        v = verdict.upper()
-        if "CONFIRM" in v:
+        v = verdict.strip().upper().replace("-", "_").replace(" ", "_")
+        if v in {"CONFIRMED", "TRUE_POSITIVE", "TP"}:
             self.metrics.swarm_confirmed += 1
             self._confirmed_findings.append(finding)
-        elif "PARTIAL" in v:
+        elif v in {"PARTIAL", "PARTIALLY_SUPPORTED", "PARTIAL_CONFIRMED"}:
             self.metrics.swarm_partial += 1
-        elif "REFUT" in v or "INVALID" in v:
+        elif v in {"REFUTED", "FALSE_POSITIVE", "FP", "INVALID", "FULL_INVALID"}:
             self.metrics.swarm_refuted += 1
+        else:
+            self.metrics.swarm_inconclusive += 1
 
     def record_token_usage(self, prompt_chars: int, response_chars: int):
         """Accumulate estimated token usage (4 chars per token rough estimate)."""
@@ -274,12 +278,28 @@ class MetricsEngine:
         """
         novel = 0
         for cf in self._confirmed_findings:
-            finding_file = cf.get("file") or cf.get("location", "")
+            finding_file = str(cf.get("file") or "").replace("\\", "/").strip("./").lower()
+            try:
+                finding_line = int(cf.get("line", 0))
+            except (TypeError, ValueError):
+                finding_line = 0
+
             covered = False
-            for sf in self._sast_findings:
-                if sf.get("file", "") in finding_file or finding_file in sf.get("file", ""):
-                    covered = True
-                    break
+            if finding_file and finding_line > 0:
+                for sf in self._sast_findings:
+                    sast_file = str(sf.get("file") or "").replace("\\", "/").strip("./").lower()
+                    try:
+                        sast_line = int(sf.get("line", 0))
+                    except (TypeError, ValueError):
+                        sast_line = 0
+                    same_file = (
+                        sast_file == finding_file
+                        or sast_file.endswith("/" + finding_file)
+                        or finding_file.endswith("/" + sast_file)
+                    )
+                    if same_file and sast_line > 0 and abs(sast_line - finding_line) <= 5:
+                        covered = True
+                        break
             if not covered:
                 novel += 1
         self.metrics.delta_vs_sast = novel

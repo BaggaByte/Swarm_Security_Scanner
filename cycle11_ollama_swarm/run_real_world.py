@@ -504,7 +504,7 @@ def run_swarm_discovery(
                 "rule_id": "discovery-001"
             }
             discovery_results.append(formatted_finding)
-            _EMIT("SYSTEM", "discovery", f"Found novel issue: {f.get('title')}")
+            _EMIT("SYSTEM", "discovery", f"Candidate finding queued for challenge: {f.get('title')}")
     return discovery_results
 
 def run_swarm_challenge(
@@ -615,7 +615,7 @@ def main():
                         help="Skip SAST phase entirely")
     parser.add_argument("--sarif-file", default=None,
                         help="Path to an external SARIF file to ingest findings from")
-    parser.add_argument("--max-chunks", type=int, default=20,
+    parser.add_argument("--max-chunks", type=int, default=0,
                         help="Max discovery chunks; use 0 to scan all eligible chunks")
     parser.add_argument("--diff-json", default=None,
                         help="JSON string of modified files and lines for differential scans")
