@@ -266,7 +266,7 @@ export default function Dashboard({ findings, scanRuns, repositories, onNavigate
         {/* Recent Critical Findings */}
         <div className="panel">
           <div className="panel-header">
-            <span className="panel-title"><AlertTriangle size={14} style={{ color: '#f87171', display: 'inline', marginRight: 6 }} />Recent Critical & High Findings</span>
+            <span className="panel-title"><AlertTriangle size={14} style={{ color: '#f87171', display: 'inline', marginRight: 6 }} />Recent Critical &amp; High Findings</span>
             <button className="link-btn" onClick={() => onNavigate('findings')}>View all →</button>
           </div>
           {recentCritical.length === 0 ? (
