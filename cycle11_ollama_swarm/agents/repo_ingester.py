@@ -27,6 +27,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
+from .redaction import redact_sensitive_content
+
+try:
+    from backend.git_url_policy import validate_git_url
+    from backend.security import validate_local_scan_path
+except ImportError:  # Direct script execution from cycle11_ollama_swarm
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from backend.git_url_policy import validate_git_url
+    from backend.security import validate_local_scan_path
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -175,38 +186,10 @@ def detect_technologies(content: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _validate_repo_url(url: str):
-    import urllib.parse
-    import socket
-    import ipaddress
-    parsed = urllib.parse.urlparse(url.strip())
-    if parsed.scheme.lower() != "https":
-        raise ValueError(f"Security error: only 'https://' Git repositories are permitted (got {parsed.scheme})")
-    if parsed.username or parsed.password:
-        raise ValueError("Security error: credentials in Git URLs are forbidden")
-    hostname = parsed.hostname
-    if not hostname:
-        raise ValueError("Security error: missing hostname in Git URL")
-    try:
-        addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
-        for entry in addr_info:
-            ip = ipaddress.ip_address(entry[4][0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-                raise ValueError(f"Security error: Git URL resolves to blocked/internal IP {ip}")
-    except socket.gaierror:
-        raise ValueError(f"Security error: unable to resolve hostname '{hostname}'")
+    return validate_git_url(url)
 
 def _validate_local_path(path_str: str):
-    real = os.path.realpath(path_str)
-    real_lower = real.lower()
-    forbidden = ["/etc", "/var", "/proc", "/sys", "/dev", "/root", "c:\\windows", "c:\\program files"]
-    for fb in forbidden:
-        if real_lower == fb or real_lower.startswith(fb + os.sep) or real_lower.startswith(fb + "/"):
-            raise PermissionError(f"Security error: scanning system directory '{path_str}' is forbidden")
-    allowed_root = os.getenv("SWARM_ALLOWED_SCAN_ROOT")
-    if allowed_root:
-        real_root = os.path.realpath(allowed_root)
-        if not (real == real_root or real.startswith(real_root + os.sep)):
-            raise PermissionError(f"Security error: path must be inside SWARM_ALLOWED_SCAN_ROOT: {real_root}")
+    return validate_local_scan_path(path_str)
 
 def clone_repo(url: str, target_dir: Optional[str] = None, branch: Optional[str] = None) -> str:
     """
@@ -214,34 +197,42 @@ def clone_repo(url: str, target_dir: Optional[str] = None, branch: Optional[str]
     Falls back to shallow clone (--depth 1) for speed.
     """
     _validate_repo_url(url)
-    if target_dir is None:
-        target_dir = tempfile.mkdtemp(prefix="swarm_repo_")
-    else:
-        os.makedirs(target_dir, exist_ok=True)
-
-    # Check git availability
     if not shutil.which("git"):
         raise RuntimeError(
             "git is not installed or not on PATH. "
             "Install git or provide a local repository path instead."
         )
+    owns_target_dir = target_dir is None
+    if owns_target_dir:
+        target_dir = tempfile.mkdtemp(prefix="swarm_repo_")
+    else:
+        os.makedirs(target_dir, exist_ok=True)
 
     print(f"  [INGEST] Cloning {url} → {target_dir}", flush=True)
     t0 = time.time()
 
-    cmd = ["git", "clone", "--depth", "1", "--single-branch"]
+    cmd = ["git", "-c", "http.followRedirects=false", "clone", "--depth", "1", "--single-branch"]
     if branch:
         cmd.extend(["--branch", branch])
     cmd.extend([url, target_dir])
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    git_env = os.environ.copy()
+    git_env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    for key in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_ASKPASS"):
+        git_env.pop(key, None)
+    for key in list(git_env):
+        if key.startswith(("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            git_env.pop(key, None)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=git_env)
+    except Exception:
+        if owns_target_dir:
+            shutil.rmtree(target_dir, ignore_errors=True)
+        raise
 
     if result.returncode != 0:
+        if owns_target_dir:
+            shutil.rmtree(target_dir, ignore_errors=True)
         raise RuntimeError(
             f"git clone failed (exit {result.returncode}):\n{result.stderr}"
         )
@@ -263,15 +254,29 @@ def _should_skip_dir(dir_name: str) -> bool:
 
 def walk_repo_files(root: str) -> Iterator[Path]:
     """Yield all security-relevant files in a repository, skipping noise."""
-    root_path = Path(root)
+    root_path = Path(root).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path):
+        current = Path(dirpath)
         # Prune skip dirs in-place so os.walk doesn't descend into them
-        dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+        dirnames[:] = [d for d in dirnames if not _should_skip_dir(d) and not (current / d).is_symlink()]
         for fname in filenames:
             fpath = Path(dirpath) / fname
+            if fpath.is_symlink():
+                continue
+            low_name = fpath.name.lower()
+            if low_name in {".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials", "credentials.json"}:
+                continue
+            if low_name.endswith((".pem", ".key", ".p12", ".pfx", ".keystore")):
+                continue
             if fpath.suffix.lower() in SECURITY_RELEVANT_EXTENSIONS or fpath.name.lower() in {"makefile", "dockerfile", "caddyfile", "nginx.conf", ".dockerignore", ".gitignore", ".env"}:
-                if MIN_FILE_BYTES <= fpath.stat().st_size <= MAX_FILE_BYTES:
-                    yield fpath
+                try:
+                    resolved = fpath.resolve(strict=True)
+                    if os.path.commonpath((str(root_path), str(resolved))) != str(root_path):
+                        continue
+                    if MIN_FILE_BYTES <= resolved.stat().st_size <= MAX_FILE_BYTES:
+                        yield resolved
+                except (OSError, ValueError):
+                    continue
 
 
 # ---------------------------------------------------------------------------
@@ -305,90 +310,139 @@ def _chunk_python(file_entry: FileEntry) -> list[CodeChunk]:
         and hasattr(node, "lineno")
     ]
 
-    for node in top_nodes:
-        start = node.lineno - 1
-        end = getattr(node, "end_lineno", start + 30)
-        snippet = "\n".join(lines[start:end])
-
-        # For classes, also extract methods as sub-chunks
-        if isinstance(node, ast.ClassDef):
-            # Class-level chunk (include class body up to MAX_CHUNK_CHARS)
-            if len(snippet) <= MAX_CHUNK_CHARS:
-                chunks.append(CodeChunk(
-                    file_path=file_entry.rel_path,
-                    language="python",
-                    chunk_type="class",
-                    name=node.name,
-                    start_line=start + 1,
-                    end_line=end,
-                    content=snippet,
-                    imports=top_imports,
-                ))
-            else:
-                # Class too large — emit each method separately
-                for method in ast.iter_child_nodes(node):
-                    if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        m_start = method.lineno - 1
-                        m_end = getattr(method, "end_lineno", m_start + 30)
-                        m_snippet = "\n".join(lines[m_start:m_end])
-                        chunks.append(CodeChunk(
-                            file_path=file_entry.rel_path,
-                            language="python",
-                            chunk_type="function",
-                            name=f"{node.name}.{method.name}",
-                            start_line=m_start + 1,
-                            end_line=m_end,
-                            content=m_snippet,
-                            imports=top_imports,
-                        ))
-        else:
+    def append_bounded(name: str, chunk_type: str, start_line: int, end_line: int, snippet: str) -> None:
+        if len(snippet) <= MAX_CHUNK_CHARS:
             chunks.append(CodeChunk(
                 file_path=file_entry.rel_path,
                 language="python",
-                chunk_type="function",
-                name=node.name,
-                start_line=start + 1,
-                end_line=end,
+                chunk_type=chunk_type,
+                name=name,
+                start_line=start_line,
+                end_line=end_line,
                 content=snippet,
                 imports=top_imports,
             ))
-
-    # If nothing was extracted (e.g., module-level script), add whole file as module chunk
-    if not chunks:
-        chunks.append(CodeChunk(
-            file_path=file_entry.rel_path,
+            return
+        fragment = FileEntry(
+            rel_path=file_entry.rel_path,
+            abs_path=file_entry.abs_path,
             language="python",
-            chunk_type="module",
-            name=Path(file_entry.rel_path).stem,
-            start_line=1,
-            end_line=len(lines),
-            content=file_entry.content[:MAX_CHUNK_CHARS],
-            imports=top_imports,
-        ))
+            size_bytes=len(snippet.encode("utf-8")),
+            content=snippet,
+            line_count=snippet.count("\n") + 1,
+        )
+        for part_index, raw_chunk in enumerate(_chunk_raw(fragment)):
+            chunks.append(CodeChunk(
+                file_path=file_entry.rel_path,
+                language="python",
+                chunk_type=chunk_type,
+                name=f"{name}[part{part_index}]",
+                start_line=start_line + raw_chunk.start_line - 1,
+                end_line=start_line + raw_chunk.end_line - 1,
+                content=raw_chunk.content,
+                imports=top_imports,
+            ))
+
+    # Keep module-level executable statements and constants as source chunks;
+    # previously only files with no functions received any module context.
+    definition_lines: set[int] = set()
+    for node in top_nodes:
+        decorator_lines = [decorator.lineno for decorator in getattr(node, "decorator_list", [])]
+        start_line = min([node.lineno, *decorator_lines])
+        end_line = getattr(node, "end_lineno", node.lineno)
+        definition_lines.update(range(start_line, end_line + 1))
+    module_segment: list[str] = []
+    module_start = 1
+
+    def flush_module_segment(end_line: int) -> None:
+        nonlocal module_segment, module_start
+        source = "".join(module_segment)
+        if source.strip():
+            fragment = FileEntry(
+                rel_path=file_entry.rel_path,
+                abs_path=file_entry.abs_path,
+                language="python",
+                size_bytes=len(source.encode("utf-8")),
+                content=source,
+                line_count=source.count("\n") + 1,
+            )
+            for part_index, raw_chunk in enumerate(_chunk_raw(fragment)):
+                chunks.append(CodeChunk(
+                    file_path=file_entry.rel_path,
+                    language="python",
+                    chunk_type="module",
+                    name=f"{Path(file_entry.rel_path).stem}[module{part_index}]",
+                    start_line=module_start + raw_chunk.start_line - 1,
+                    end_line=module_start + raw_chunk.end_line - 1,
+                    content=raw_chunk.content,
+                    imports=top_imports,
+                ))
+        module_segment = []
+
+    for line_number, source_line in enumerate(lines, start=1):
+        if line_number in definition_lines:
+            flush_module_segment(line_number - 1)
+            module_start = line_number + 1
+        else:
+            if not module_segment:
+                module_start = line_number
+            module_segment.append(source_line + "\n")
+    flush_module_segment(len(lines))
+
+    for node in top_nodes:
+        decorator_lines = [decorator.lineno for decorator in getattr(node, "decorator_list", [])]
+        start = min([node.lineno, *decorator_lines]) - 1
+        end = getattr(node, "end_lineno", start + 30)
+        snippet = "\n".join(lines[start:end])
+
+        chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
+        append_bounded(node.name, chunk_type, start + 1, end, snippet)
 
     return chunks
 
 
 def _chunk_raw(file_entry: FileEntry) -> list[CodeChunk]:
-    """Fallback: chunk by raw character count for non-Python files."""
+    """Chunk at line boundaries and keep every prompt below the size ceiling."""
     chunks: list[CodeChunk] = []
-    content = file_entry.content
     part = 0
+    current: list[str] = []
+    current_chars = 0
+    current_start = 1
+    current_line = 1
 
-    for offset in range(0, len(content), MAX_CHUNK_CHARS):
-        snippet = content[offset:offset + MAX_CHUNK_CHARS]
-        start_line = content[:offset].count("\n") + 1
-        end_line = start_line + snippet.count("\n")
+    for line in file_entry.content.splitlines(keepends=True):
+        pieces = [line[i:i + MAX_CHUNK_CHARS] for i in range(0, len(line), MAX_CHUNK_CHARS)] or [line]
+        for piece in pieces:
+            if current and current_chars + len(piece) > MAX_CHUNK_CHARS:
+                current_content = "".join(current)
+                chunks.append(CodeChunk(
+                    file_path=file_entry.rel_path,
+                    language=file_entry.language,
+                    chunk_type="raw",
+                    name=f"{Path(file_entry.rel_path).name}[part{part}]",
+                    start_line=current_start,
+                    end_line=max(current_start, current_start + current_content.count("\n") - int(current_content.endswith("\n"))),
+                    content=current_content,
+                ))
+                part += 1
+                current = []
+                current_chars = 0
+                current_start = current_line
+            current.append(piece)
+            current_chars += len(piece)
+            current_line += piece.count("\n")
+
+    if current:
+        content = "".join(current)
         chunks.append(CodeChunk(
             file_path=file_entry.rel_path,
             language=file_entry.language,
             chunk_type="raw",
             name=f"{Path(file_entry.rel_path).name}[part{part}]",
-            start_line=start_line,
-            end_line=end_line,
-            content=snippet,
+            start_line=current_start,
+            end_line=max(current_start, current_start + content.count("\n") - int(content.endswith("\n"))),
+            content=content,
         ))
-        part += 1
 
     return chunks
 
@@ -432,11 +486,12 @@ def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: 
     # Step 2: Walk and load files
     files: list[FileEntry] = []
     lang_distribution: dict[str, int] = {}
-    all_content_sample = ""   # Sample for framework detection (first 50KB)
+    frameworks_seen: set[str] = set()
+    technologies_seen: set[str] = set()
 
     for fpath in walk_repo_files(repo_root):
         try:
-            content = fpath.read_text(encoding="utf-8", errors="replace")
+            content = redact_sensitive_content(fpath.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             continue
 
@@ -457,13 +512,13 @@ def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: 
         )
         files.append(entry)
 
-        # Accumulate sample for framework/tech detection
-        if len(all_content_sample) < 50_000:
-            all_content_sample += content[:1_000]
+        # Inventory all loaded files instead of sampling only a repository prefix.
+        frameworks_seen.update(detect_framework(content))
+        technologies_seen.update(detect_technologies(content))
 
     # Step 3: Detect frameworks and technologies
-    frameworks = detect_framework(all_content_sample)
-    technologies = detect_technologies(all_content_sample)
+    frameworks = sorted(frameworks_seen)
+    technologies = sorted(technologies_seen)
 
     # Step 4: Identify entry points and config files
     entry_point_names = {"main.py", "app.py", "server.py", "api.py", "wsgi.py",
@@ -527,7 +582,7 @@ def ingest_repository(source: str, clone_to: Optional[str] = None, diff_filter: 
 def repo_map_to_summary(repo_map: RepoMap) -> str:
     """
     Generate a compact text summary of the RepoMap to inject into agent prompts.
-    Tells agents what technologies exist so they don't hallucinate absent ones.
+    Provides a heuristic inventory and asks agents to verify source evidence.
     """
     lines = [
         f"REPOSITORY: {repo_map.repo_name}",
@@ -538,9 +593,7 @@ def repo_map_to_summary(repo_map: RepoMap) -> str:
         f"Entry points: {', '.join(repo_map.entry_points) or 'none identified'}",
         f"Config files: {', '.join(repo_map.config_files) or 'none identified'}",
         "",
-        "IMPORTANT CONSTRAINT FOR AGENTS:",
-        "Only report vulnerabilities that involve technologies ACTUALLY PRESENT in the list above.",
-        f"If 'sql' is NOT in the technology list, do NOT claim SQL injection.",
-        f"If 'deserialization' is NOT in the technology list, do NOT claim deserialization attacks.",
+        "Technology inventory is heuristic and may be incomplete. Absence from this list is not proof",
+        "that a technology or vulnerability is absent. Verify claims against the supplied code.",
     ]
     return "\n".join(lines)

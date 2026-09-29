@@ -2,7 +2,7 @@
 Swarm Security Scanner — Production FastAPI Backend
 ===================================================
 Production-hardened API with:
-  • Authentication & RBAC (Bearer token / X-API-Key / query token)
+  • API-key authentication (Bearer token / X-API-Key)
   • Durable SQLite state persistence across restarts
   • Strict boundary validation (path traversal, SSRF prevention)
   • Hardened Docker sandbox execution with network isolation
@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import uuid
+import secrets
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Optional, List, Any
 
@@ -105,6 +106,9 @@ class RunState:
 
 _runs: Dict[str, RunState] = {}
 _runs_lock = threading.Lock()
+_stream_tickets: Dict[str, tuple[str, float]] = {}
+_stream_tickets_lock = threading.Lock()
+STREAM_TICKET_TTL_SECONDS = 24 * 60 * 60
 
 # ---------------------------------------------------------------------------
 # Lifespan: graceful shutdown terminates active subprocesses
@@ -163,7 +167,7 @@ class RepoScanRequest(BaseModel):
     repo: str = Field(..., min_length=1, max_length=500, description="Git HTTPS URL or validated local path")
     model: str = Field(default="llama3.2", max_length=80)
     challenger_model: str = Field(default="qwen2.5-coder:7b", max_length=80)
-    workers: int = Field(default=5, ge=1, le=5)
+    workers: int = Field(default=3, ge=1, le=3, description="Number of role-based SAST triage perspectives")
     challengers: int = Field(default=2, ge=1, le=2)
     sast_tools: list[str] = Field(default=["bandit", "semgrep"])
     no_sast: bool = Field(default=False)
@@ -579,8 +583,26 @@ async def _event_stream(run_id: str) -> AsyncGenerator[str, None]:
     yield f"data: {payload}\n\n"
 
 
-@app.get("/api/scan/{run_id}/stream", dependencies=[Security(require_api_key)])
-async def stream_scan(run_id: str):
+@app.post("/api/scan/{run_id}/stream-ticket", dependencies=[Security(require_api_key)])
+async def create_stream_ticket(run_id: str):
+    if not _runs.get(run_id) and not db.get_run(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    now = time.time()
+    ticket = secrets.token_urlsafe(32)
+    with _stream_tickets_lock:
+        for old_ticket, (_, expires_at) in list(_stream_tickets.items()):
+            if expires_at <= now:
+                _stream_tickets.pop(old_ticket, None)
+        _stream_tickets[ticket] = (run_id, now + STREAM_TICKET_TTL_SECONDS)
+    return {"ticket": ticket, "expires_in": STREAM_TICKET_TTL_SECONDS}
+
+
+@app.get("/api/scan/{run_id}/stream")
+async def stream_scan(run_id: str, ticket: str):
+    with _stream_tickets_lock:
+        grant = _stream_tickets.get(ticket)
+    if not grant or grant[0] != run_id or grant[1] <= time.time():
+        raise HTTPException(status_code=401, detail="Invalid or expired stream ticket")
     return StreamingResponse(
         _event_stream(run_id),
         media_type="text/event-stream",
@@ -664,6 +686,11 @@ async def verify_exploitability(req: VerifyRequest):
     Milestone 4.1: Exploit Validation Sandbox
     Validates target URL, generates an exploit script, and executes in isolated Docker container.
     """
+    if os.getenv("SWARM_ENABLE_EXPLOIT_VERIFICATION", "false").lower() not in ("true", "1", "yes"):
+        raise HTTPException(
+            status_code=503,
+            detail="Exploit verification is disabled. Enable it only with a dedicated isolated Docker daemon.",
+        )
     validated_target = validate_sandbox_target_url(req.target_url)
 
     prompt = (

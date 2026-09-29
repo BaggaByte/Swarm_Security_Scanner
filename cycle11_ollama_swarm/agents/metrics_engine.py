@@ -94,7 +94,7 @@ class RunMetrics:
 
     # ---- ROI / Triage Engine Metrics ----
     triage_fp_reduction_rate: float = 0.0
-    triage_time_saved_mins: float = 0.0
+    triage_time_saved_mins: float = 0.0  # Kept for schema compatibility; not estimated without reviewer data.
     swarm_consensus_rate: float = 0.0
     triage_inconclusive_rate: float = 0.0
     
@@ -179,11 +179,11 @@ class RunMetrics:
             f"  Inconclusive:          {self.swarm_inconclusive}",
             f"  ── Delta Analysis ────────────────────────────────────",
             f"  Novel Swarm findings (not in SAST):  {self.delta_vs_sast}",
-            f"  SAST false positives eliminated:     {self.sast_false_positives_found}",
+            f"  Alerts classified as false positive: {self.sast_false_positives_found}",
             f"  ── ROI & Triage ──────────────────────────────────────",
-            f"  FP Reduction Rate:                   {self.triage_fp_reduction_rate:.1%}",
-            f"  Estimated Time Saved:                {self.triage_time_saved_mins:.1f} mins",
-            f"  Swarm Consensus Rate:                {self.swarm_consensus_rate:.1%}",
+            f"  False-positive share of triage:       {self.triage_fp_reduction_rate:.1%}",
+            f"  Reviewer Time Saved:                 not measured",
+            f"  Unanimous Triage Rate:               {self.swarm_consensus_rate:.1%}",
             f"  Inconclusive Rate:                   {self.triage_inconclusive_rate:.1%}",
             f"",
             f"  ── Human-in-the-Loop Feedback ────────────────────────",
@@ -321,12 +321,10 @@ class MetricsEngine:
         self.metrics.triage_fp_reduction_rate = fp_count / total_triaged
         self.metrics.triage_inconclusive_rate = inconclusive_count / total_triaged
 
-        # Assume 15 minutes of human time saved per FP automatically dismissed
-        self.metrics.triage_time_saved_mins = fp_count * 15.0
-
-        # Consensus rate: rate of HIGH confidence verdicts
-        high_confidence = sum(1 for r in triage_results if r.get("confidence") == "HIGH")
-        self.metrics.swarm_consensus_rate = high_confidence / total_triaged
+        # Model confidence is not evidence of agreement; only explicit unanimous
+        # role votes count as consensus. This is still one model under role prompts.
+        unanimous = sum(1 for r in triage_results if r.get("unanimous") is True)
+        self.metrics.swarm_consensus_rate = unanimous / total_triaged
 
     def compute_ground_truth_accuracy(self):
         """

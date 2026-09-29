@@ -18,11 +18,9 @@ services:
       - SWARM_MAX_CONCURRENT_SCANS=3
       - SWARM_SANDBOX_NETWORK=sandbox-net
       - SWARM_ALLOWED_SANDBOX_TARGETS=http://sandbox-target:5000
-      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - SWARM_ENABLE_EXPLOIT_VERIFICATION=false
     volumes:
       - swarm_data:/app/backend/data
-    depends_on:
-      - docker-socket-proxy
     security_opt:
       - no-new-privileges:true
     deploy:
@@ -32,18 +30,6 @@ services:
           memory: 4G
     networks:
       - swarm-internal
-      - docker-net
-
-  docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      CONTAINERS: 1
-    networks:
-      - docker-net
-    security_opt:
-      - no-new-privileges:true
 
   ollama:
     image: ollama/ollama:latest
@@ -82,9 +68,6 @@ volumes:
 networks:
   swarm-internal:
     driver: bridge
-  docker-net:
-    driver: bridge
-    internal: true
   sandbox-net:
     driver: bridge
     internal: true

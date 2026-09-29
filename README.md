@@ -71,11 +71,11 @@ The **Antigravity Swarm Security Scanner** orchestrates multiple local LLMs (via
 It operates in two modes:
 
 **Real-World Mode** — For analysing real repositories. The platform:
-1. Clones or walks any repository (multi-language)
+1. Clones an HTTPS repository from an allowlisted public Git host, or walks a validated local path
 2. Runs Bandit + Semgrep for a SAST baseline
-3. Uses LLMs to triage SAST alerts (True/False Positive classification)
+3. Uses one selected LLM, with up to three role-based prompts, to triage SAST alerts as true positive, false positive, or inconclusive
 4. Hunts for complex logic flaws SAST tools miss
-5. Reports Precision, Recall, F1, Delta-vs-SAST, and token efficiency metrics
+5. Reports scan coverage and model triage outcomes; accuracy metrics require supplied ground truth
 
 **Sandbox Mode** — For research experiments. The platform runs 12 validated experiment cycles (11–22) on a controlled benchmark with planted ground-truth flaws, using a 6-axis adversarial challenger rubric to evaluate LLM security audit quality.
 
@@ -106,7 +106,7 @@ As the product matures toward an enterprise-ready limited beta, development is p
 
 ```bash
 # Python dependencies
-pip install fastapi uvicorn python-multipart
+pip install -r backend/requirements.txt
 
 # Frontend dependencies
 cd frontend
@@ -134,6 +134,10 @@ docker compose -f docker-compose.prod.yml exec ollama ollama pull qwen2.5-coder:
 
 The production server starts on `http://localhost:8000` with a single Uvicorn worker (to prevent in-memory state conflicts) and static asset serving. The compose stack also includes an embedded Ollama service for local LLM inference.
 
+Remote Git clones are restricted to `github.com`, `gitlab.com`, and `bitbucket.org` over HTTPS by default. Set `SWARM_ALLOWED_GIT_HOSTS` only to public Git hosts you trust. Repository `.env` files, credential files, and symlinks are excluded from ingestion; likely secrets in other source files are redacted before model prompts and SAST output.
+
+Selecting a hosted model sends analyzed code chunks and finding context to that configured model provider. Local Ollama models send prompts to the Ollama server you configured.
+
 #### 2. Local Development
 
 For local research and interactive development:
@@ -145,9 +149,8 @@ Double-click: start.bat
 
 **Manual — Two terminals:**
 ```bash
-# Terminal 1 — Backend (port 8000)
-cd backend
-python -m uvicorn main:app --reload --port 8000
+# Terminal 1 — Backend (port 8001; run from the repository root)
+python -m uvicorn backend.main:app --reload --port 8001
 
 # Terminal 2 — Frontend (port 5173)
 cd frontend
@@ -167,10 +170,10 @@ The Swarm Security Scanner implements Defense-in-Depth AppSec controls across 5 
 
 | Security Domain | Implementation | Defense Mechanism |
 |---|---|---|
-| **API Authentication** | `backend/security.py` | Bearer token / `X-API-Key` / query token for SSE. Rejects anonymous access in production. |
+| **API Authentication** | `backend/security.py`, `backend/main.py` | Bearer token / `X-API-Key`; browser SSE uses a short-lived scoped ticket instead of putting the API key in a URL. Rejects anonymous access in production. |
 | **Boundary & Path Traversal** | `backend/security.py` | Canonical `realpath` resolution, system root blocking (`/etc`, `/proc`, `C:\Windows`), `SWARM_ALLOWED_SCAN_ROOT` jail. |
 | **SSRF Prevention** | `backend/security.py` | HTTPS scheme enforcement, DNS resolution check, blocks loopback, link-local, RFC-1918 private IPs, and cloud metadata (`169.254.169.254`). |
-| **Exploit Sandbox Isolation** | `backend/sandbox_runner.py` | Docker container runs with `network_mode="none"`, `read_only=True`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, strict memory/CPU/PID limits, and unprivileged user (`UID 1000`). API runs as an unprivileged user and safely orchestrates containers via a TCP `docker-socket-proxy`. |
+| **Exploit Sandbox Isolation** | `backend/sandbox_runner.py` | Exploit verification is disabled by default. Enabling it requires access to a dedicated disposable Docker daemon; the production Compose stack does not mount or proxy the host Docker socket. When enabled, exploit containers use a read-only filesystem, dropped capabilities, no-new-privileges, resource limits, and an unprivileged user. |
 | **Webhook Verification** | `backend/main.py` | Mandatory HMAC-SHA256 signature verification (`X-Hub-Signature-256`), rejects unsigned or invalid payloads. |
 | **Durable Persistence** | `backend/database.py` | SQLite backing store preserves scan runs, audit logs, and human feedback across service restarts. |
 | **Automated CI/CD** | `.github/workflows/ci.yml` | GitHub Actions pipeline running linting, type checks, and full security test suite on all PRs. |
@@ -189,6 +192,8 @@ The Swarm Security Scanner implements Defense-in-Depth AppSec controls across 5 
 - Best for: **evaluating the architecture itself**
 
 ### ⬡ Real-World Repo Mode
+
+The real-world scanner uses one discovery model to inspect chunks and one challenger model to review discoveries. SAST triage asks the selected model for up to three role-based reviews; these are not independent model evaluations. A finding is marked confirmed by triage only when all configured roles agree. Disagreement, missing output, and model errors remain inconclusive. At most 30 eligible SAST alerts are triaged per run, and scan metadata marks incomplete triage coverage as partial. Treat these results as review guidance, not ground-truth accuracy measurements.
 *Production-oriented — scan any real codebase.*
 
 - Input: any `https://github.com/org/repo` URL or local directory path
@@ -403,7 +408,7 @@ Phase 4 — Measurement        (precision, recall, schema telemetry, report)
 | `crypto_analyst` | Weak hashes, missing encryption, insecure RNG, key management |
 | `data_exposure` | PII leakage, excessive data return, secrets in logs |
 
-> **Real-World mode only**: Agent prompts are dynamically constrained to the technology stack detected in *this specific repository*. If SQL is not detected, `injection_analyst` will not claim SQL injection. This eliminates the most common source of LLM hallucination in security scanning.
+> **Real-World mode only**: The technology inventory is a heuristic hint. It can be incomplete, so findings must be supported by source evidence and an absent technology label does not rule out a vulnerability. SAST triage uses one selected model with role-based prompts; those are not independent model votes.
 
 ### Challenger Agents (6-Axis Rubric)
 
@@ -424,7 +429,7 @@ Two independent adversarial reviewers evaluate every finding that passes the Sch
 
 ## API Reference
 
-Interactive docs: **http://localhost:8000/docs**
+Interactive docs: **http://localhost:8001/docs** during local development, **http://localhost:8000/docs** in the production Compose stack.
 
 ### `POST /api/scan` — Sandbox scan
 
@@ -465,6 +470,8 @@ Interactive docs: **http://localhost:8000/docs**
 ---
 
 ### `GET /api/scan/{run_id}/stream` — Live SSE stream (both modes)
+
+First call `POST /api/scan/{run_id}/stream-ticket` with the API key in an Authorization header. Use the returned short-lived ticket as the `ticket` query parameter for the SSE URL; do not put the API key itself in the URL.
 
 Each `data:` payload is a structured JSON line:
 
@@ -515,12 +522,12 @@ Toggle between modes at any time. Both modes share the same SSE stream infrastru
 - Repository URL or local path input
 - SAST tool selection (Bandit, Semgrep, or skip entirely)
 - Discovery/Challenger model names
-- Max chunks per agent slider (5–100, each ~6,000 chars)
+- Max chunks slider (0 scans all eligible chunks; each chunk is capped near 6,000 characters)
 - Phase-by-phase explanation cards
 
 **⚔ Triage tab**
-- Live TP/FP classification table as SAST alerts are reviewed
-- Colour-coded cards (green border = True Positive, red border = False Positive)
+- Live triage table as SAST alerts are reviewed
+- Colour-coded cards for true positive, false positive, and inconclusive outcomes
 - Rationale text from the LLM for each classification
 - Summary counts: `✓ N True Positives` · `✗ N False Positives` · `N Pending`
 
@@ -597,7 +604,7 @@ class RepoScanRequest(BaseModel):
     repo:             str            # Git URL or local path
     model:            str            # default: "llama3.2"
     challenger_model: str            # default: "qwen2.5-coder:7b"
-    workers:          int            # 1–5
+    workers:          int            # 1–3 role-based SAST triage perspectives
     challengers:      int            # 1–2
     sast_tools:       list[str]      # ["bandit", "semgrep"]
     no_sast:          bool           # skip SAST entirely
@@ -705,9 +712,9 @@ npm run preview   # Preview the production build
 ### Backend development
 
 ```bash
-cd backend
-python -m uvicorn main:app --reload --port 8000
-# Interactive API docs: http://localhost:8000/docs
+# Run from the repository root
+python -m uvicorn backend.main:app --reload --port 8001
+# Interactive API docs: http://localhost:8001/docs
 ```
 
 ### Adding a new SAST tool

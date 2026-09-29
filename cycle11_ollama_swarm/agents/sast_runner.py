@@ -32,6 +32,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from .redaction import redact_sensitive_content
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ def run_bandit(repo_root: str) -> list[dict]:
     findings = []
     for r in data.get("results", []):
         # Extract snippet
-        code_snippet = r.get("code", "").strip()[:400]
+        code_snippet = redact_sensitive_content(r.get("code", "").strip()[:400])
         cwe_str = None
         cwe_info = r.get("issue_cwe", {})
         if cwe_info:
@@ -152,7 +153,7 @@ def run_bandit(repo_root: str) -> list[dict]:
             "severity":   SEVERITY_MAP_BANDIT.get(r.get("issue_severity", "LOW"), "LOW"),
             "confidence": r.get("issue_confidence", "LOW"),
             "cwe":        cwe_str,
-            "message":    r.get("issue_text", ""),
+            "message":    redact_sensitive_content(r.get("issue_text", "")),
             "code":       code_snippet,
             "more_info":  r.get("more_info", ""),
         })
@@ -189,6 +190,8 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
         "--no-git-ignore",
         "--timeout", "60",
     ]
+    for pattern in (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", ".netrc", "credentials", "credentials.json"):
+        cmd += ["--exclude", pattern]
     for rs in rulesets:
         cmd += ["--config", rs]
     cmd.append(repo_root)
@@ -231,7 +234,7 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
         cwe_str = ", ".join(cwe_tags) if cwe_tags else None
 
         # Snippet
-        code_snippet = r.get("extra", {}).get("lines", "").strip()[:400]
+        code_snippet = redact_sensitive_content(r.get("extra", {}).get("lines", "").strip()[:400])
         rel_file = os.path.relpath(r.get("path", ""), repo_root).replace("\\", "/")
 
         findings.append({
@@ -245,7 +248,7 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
             "severity":   severity,
             "confidence": meta.get("confidence", "MEDIUM"),
             "cwe":        cwe_str,
-            "message":    r.get("extra", {}).get("message", ""),
+            "message":    redact_sensitive_content(r.get("extra", {}).get("message", "")),
             "code":       code_snippet,
             "more_info":  meta.get("references", [None])[0] if meta.get("references") else None,
             "owasp":      meta.get("owasp", None),

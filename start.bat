@@ -37,10 +37,10 @@ echo.
 
 REM ─── Install Python deps if needed ───
 echo [2/3] Checking Python dependencies...
-pip show fastapi uvicorn >nul 2>&1
+pip show fastapi uvicorn python-dotenv pydantic docker httpx bandit semgrep >nul 2>&1
 if %errorlevel% neq 0 (
-    echo  [INFO] Installing Python deps: fastapi uvicorn python-multipart
-    pip install fastapi uvicorn python-multipart --quiet
+    echo  [INFO] Installing backend requirements...
+    pip install -r "%~dp0backend\requirements.txt" --quiet
 )
 echo  [OK]   Python deps ready.
 echo.

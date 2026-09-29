@@ -47,7 +47,7 @@ const DEFAULT_REPO: RepoScanConfig = {
   repo: '',
   model: 'llama3.2',
   challengerModel: 'qwen2.5-coder:7b',
-  workers: 5,
+  workers: 3,
   challengers: 2,
   sastTools: ['bandit', 'semgrep'],
   noSast: false,
@@ -373,9 +373,22 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
 
-  const subscribeToRun = useCallback((id: string, repo: string) => {
+  const subscribeToRun = useCallback(async (id: string, repo: string) => {
     if (esRef.current) esRef.current.close();
-    const es = new EventSource(`${API}/api/scan/${id}/stream?token=${encodeURIComponent(apiKey)}`);
+    let ticket: string;
+    try {
+      const response = await fetch(`${API}/api/scan/${id}/stream-ticket`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+      if (!response.ok) throw new Error(`Stream authorization failed (${response.status})`);
+      ticket = (await response.json()).ticket;
+    } catch (error) {
+      setStreamStatus('error');
+      console.error('Unable to authorize scan stream:', error);
+      return;
+    }
+    const es = new EventSource(`${API}/api/scan/${id}/stream?ticket=${encodeURIComponent(ticket)}`);
     esRef.current = es;
 
     es.onopen = () => setStreamStatus('connected');
@@ -465,9 +478,10 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
     es.onerror = () => { 
       // Do not close immediately; let EventSource attempt to reconnect
+      setStreamStatus('error');
       console.warn("EventSource disconnected or errored, attempting to reconnect...");
     };
-  }, [sandboxConfig, repoConfig, scanMode, onFindingsFound, onScanRunSaved, onRepoAdded, setNodes]);
+  }, [apiKey, sandboxConfig, repoConfig, scanMode, onFindingsFound, onScanRunSaved, onRepoAdded, setNodes]);
 
   const subscribeToRunDep = useCallback(subscribeToRun, [apiKey, setNodes, setRunning, setLogs, onFindingsFound, onScanRunSaved, onRepoAdded]);
 
@@ -675,8 +689,8 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
                 />
 
                 <div className="scan-field">
-                  <label className="scan-label">Workers ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
-                  <input type="range" min={1} max={10}
+                  <label className="scan-label">{scanMode === 'sandbox' ? 'Workers' : 'Triage Perspectives'} ({scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers})</label>
+                  <input type="range" min={1} max={scanMode === 'sandbox' ? 10 : 3}
                     value={scanMode === 'sandbox' ? sandboxConfig.workers : repoConfig.workers}
                     onChange={e => scanMode === 'sandbox'
                       ? setSandboxConfig(c => ({ ...c, workers: +e.target.value }))

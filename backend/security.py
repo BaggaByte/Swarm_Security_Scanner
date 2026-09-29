@@ -2,7 +2,7 @@
 Swarm Security Scanner — Production Security & Validation Module
 ================================================================
 Implements Defense-in-Depth controls:
-  1. API Key Authentication (Bearer, X-API-Key, or Query Token for SSE)
+  1. API Key Authentication (Bearer or X-API-Key)
   2. Strict Path Traversal and Local Directory Boundary Validation
   3. SSRF (Server-Side Request Forgery) Prevention for Git Clones
   4. Mandatory GitHub Webhook HMAC-SHA256 Signature Verification
@@ -13,12 +13,11 @@ import os
 import hmac
 import hashlib
 import ipaddress
-import socket
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from .git_url_policy import validate_git_url
 
-from fastapi import HTTPException, Security, Request, status
+from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 
 # ---------------------------------------------------------------------------
@@ -32,7 +31,6 @@ def get_configured_api_key() -> Optional[str]:
     return os.getenv("SWARM_API_KEY", "").strip() or None
 
 async def require_api_key(
-    request: Request,
     api_key_header: Optional[str] = Security(API_KEY_HEADER),
     bearer_auth: Optional[HTTPAuthorizationCredentials] = Security(HTTP_BEARER),
 ) -> str:
@@ -41,7 +39,6 @@ async def require_api_key(
     Accepts:
       1. Header 'X-API-Key: <key>'
       2. Header 'Authorization: Bearer <key>'
-      3. Query parameter '?token=<key>' or '?api_key=<key>' (for EventSource SSE)
     If SWARM_API_KEY is not set, checks SWARM_ALLOW_ANONYMOUS=true.
     If anonymous is NOT explicitly allowed, rejects with 401 Unauthorized.
     """
@@ -62,15 +59,11 @@ async def require_api_key(
         provided_key = api_key_header.strip()
     elif bearer_auth and bearer_auth.credentials:
         provided_key = bearer_auth.credentials.strip()
-    elif "token" in request.query_params:
-        provided_key = request.query_params.get("token", "").strip()
-    elif "api_key" in request.query_params:
-        provided_key = request.query_params.get("api_key", "").strip()
 
     if not provided_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Provide 'X-API-Key', 'Authorization: Bearer <token>', or '?token=' query parameter.",
+            detail="Authentication required. Provide 'X-API-Key' or 'Authorization: Bearer <token>'.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -131,53 +124,13 @@ def validate_remote_git_url(url_str: str) -> str:
     - Resolves hostname via DNS and ensures none of the IPs are private/loopback/cloud metadata.
     - Disallows credentials in URL (user:pass@host).
     """
-    parsed = urlparse(url_str.strip())
-    if parsed.scheme.lower() != "https":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid Git URL scheme '{parsed.scheme}'. Only 'https://' repositories are permitted for security.",
-        )
-
-    if parsed.username or parsed.password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Embedded user credentials in Git URLs are not permitted.",
-        )
-
-    hostname = parsed.hostname
-    if not hostname:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Git URL: missing hostname.",
-        )
-
-    # Disallow literal private IPs in host
     try:
-        if is_ip_blocked(hostname):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Access to private/internal network address '{hostname}' is blocked.",
-            )
-    except Exception:
-        pass
-
-    # Resolve hostname to check for SSRF
-    try:
-        addr_info = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
-        for entry in addr_info:
-            ip_str = entry[4][0]
-            if is_ip_blocked(ip_str):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Access to internal network address is prohibited.",
-                )
-    except socket.gaierror:
+        return validate_git_url(url_str)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unable to resolve hostname '{hostname}'.",
-        )
-
-    return url_str.strip()
+            detail=str(exc),
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

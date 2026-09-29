@@ -34,6 +34,9 @@ def run_exploit_in_sandbox(
     if docker is None:
         return False, "Docker SDK is not installed in the Python environment."
 
+    if os.getenv("SWARM_ENABLE_EXPLOIT_VERIFICATION", "false").lower() not in ("true", "1", "yes"):
+        return False, "Exploit verification is disabled; enable it only with a dedicated isolated Docker daemon."
+
     try:
         client = docker.from_env()
     except Exception as e:

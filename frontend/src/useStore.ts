@@ -1,19 +1,6 @@
 import { useSyncExternalStore, useCallback } from 'react';
 import type { Finding, ScanRun, Repository } from './types';
 
-function readLS<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeLS<T>(key: string, value: T) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
-}
-
 type StoreState = {
   findings: Finding[];
   scanRuns: ScanRun[];
@@ -21,11 +8,33 @@ type StoreState = {
   apiKey: string;
 };
 
+function readSessionApiKey(): string {
+  try {
+    const key = sessionStorage.getItem('ag_api_key') || '';
+    // Remove the older persistent copy after migrating it into this tab's session.
+    const legacy = localStorage.getItem('ag_api_key');
+    if (!key && legacy) sessionStorage.setItem('ag_api_key', JSON.parse(legacy));
+    localStorage.removeItem('ag_api_key');
+    return key || (legacy ? JSON.parse(legacy) : '');
+  } catch {
+    try { localStorage.removeItem('ag_api_key'); } catch { /* storage unavailable */ }
+    return '';
+  }
+}
+
+function writeSessionApiKey(value: string) {
+  try {
+    if (value) sessionStorage.setItem('ag_api_key', value);
+    else sessionStorage.removeItem('ag_api_key');
+    localStorage.removeItem('ag_api_key');
+  } catch { /* storage unavailable */ }
+}
+
 let state: StoreState = {
   findings: [],
   scanRuns: [],
   repositories: [],
-  apiKey: readLS('ag_api_key', ''),
+  apiKey: readSessionApiKey(),
 };
 
 let isSynced = false;
@@ -52,7 +61,7 @@ fetchState();
 function setState(newState: Partial<StoreState>) {
   state = { ...state, ...newState };
   if ('apiKey' in newState) {
-    writeLS('ag_api_key', state.apiKey);
+    writeSessionApiKey(state.apiKey);
     fetchState();
   } else if (isSynced && state.apiKey) {
     const api = window.location.origin.includes('5173') ? 'http://127.0.0.1:8001' : '';

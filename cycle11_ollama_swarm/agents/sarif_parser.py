@@ -8,9 +8,13 @@ and normalises them into the unified SAST finding format.
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
-def parse_sarif(file_path: str) -> list[dict]:
+from .sast_runner import _source_scope
+
+def parse_sarif(file_path: str, repo_root: Optional[str] = None) -> list[dict]:
     """
     Parse a SARIF file and return a list of unified findings.
     """
@@ -58,6 +62,24 @@ def parse_sarif(file_path: str) -> list[dict]:
                 physical_location = locations[0].get("physicalLocation", {})
                 artifact_location = physical_location.get("artifactLocation", {})
                 file_path_str = artifact_location.get("uri", "unknown")
+                parsed_uri = urlparse(file_path_str)
+                if parsed_uri.scheme == "file":
+                    local_path = unquote(parsed_uri.path)
+                    if os.name == "nt" and len(local_path) > 2 and local_path[0] == "/" and local_path[2] == ":":
+                        local_path = local_path[1:]
+                    file_path_str = os.path.abspath(local_path)
+                    if repo_root:
+                        try:
+                            file_path_str = os.path.relpath(file_path_str, repo_root).replace("\\", "/")
+                        except ValueError:
+                            pass
+                else:
+                    file_path_str = unquote(parsed_uri.path).replace("\\", "/").removeprefix("./")
+                    if repo_root and os.path.isabs(file_path_str):
+                        try:
+                            file_path_str = os.path.relpath(file_path_str, repo_root).replace("\\", "/")
+                        except ValueError:
+                            pass
                 
                 region = physical_location.get("region", {})
                 line = region.get("startLine", 0)
@@ -79,6 +101,7 @@ def parse_sarif(file_path: str) -> list[dict]:
                 "tool": tool_name,
                 "rule_id": rule_id,
                 "file": file_path_str,
+                "source_scope": _source_scope(file_path_str),
                 "line": line,
                 "col": col,
                 "severity": severity,
