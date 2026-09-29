@@ -126,10 +126,16 @@ function parseLine(raw: string): LogEntry | null {
   if (!line || line.startsWith(':')) return null;
   try {
     const obj = JSON.parse(line);
-    return { id: Date.now() + Math.random(), type: (obj.type || 'SYSTEM') as LogType, agent: obj.agent || 'system', content: obj.content || line, ts: Date.now(), finding: obj.finding, verdict: obj.verdict, rationale: obj.rationale, metrics: obj.metrics };
+    return { id: Date.now() + Math.random(), type: (obj.type || 'SYSTEM') as LogType, agent: obj.agent || 'system', content: obj.content || line, ts: Date.now(), finding: obj.finding, verdict: obj.verdict, rationale: obj.rationale, metrics: obj.metrics, scanStatus: obj.scan_status };
   } catch {
     return { id: Date.now() + Math.random(), type: 'SYSTEM', agent: 'runner', content: line, ts: Date.now() };
   }
+}
+
+function sourceScopeLabel(finding?: Record<string, unknown>) {
+  if (finding?.source_scope === 'benchmark_fixture') return '[Benchmark fixture] ';
+  if (finding?.source_scope === 'test_fixture') return '[Test fixture] ';
+  return '';
 }
 
 // ── Parse triage from SSE logs ─────────────────────────────────────────────
@@ -144,7 +150,7 @@ function extractFindings(logs: LogEntry[], scanId: string, repo: string): Findin
           repository: repo || 'sandbox',
           file: log.finding.file || 'Unknown',
           line: log.finding.line || 0,
-          title: log.finding.message || 'Finding',
+          title: `${sourceScopeLabel(log.finding)}${log.finding.message || 'Finding'}`,
           description: log.rationale || log.content,
           severity: log.finding.severity || 'MEDIUM',
           cwe: null,
@@ -230,6 +236,11 @@ function ModelSelector({
         {isCustom && <option value={value}>Current custom model · {value}</option>}
         <option value={CUSTOM_MODEL}>Enter a custom model name…</option>
       </select>
+      {value.startsWith('groq/') && (
+        <p className="scan-model-help" role="note">
+          Hosted model selected: repository code and prompts will be sent to Groq.
+        </p>
+      )}
       {(isCustom || value === '') && (
         <input
           className="scan-input"
@@ -408,7 +419,8 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
             id,
             type: scanMode,
             repository: repo || undefined,
-            status: (entry.type === 'ERROR' || (entry.type === 'DONE' && (entry as any).exit_code !== 0)) ? 'error' : 'done',
+            status: (entry.type === 'ERROR' || (entry.type === 'DONE' && (entry as any).exit_code !== 0))
+              ? 'error' : entry.scanStatus === 'partial' ? 'partial' : 'done',
             startedAt: Date.now() - (rawMetrics.durationSeconds || 0) * 1000,
             finishedAt: Date.now(),
             model: scanMode === 'sandbox' ? sandboxConfig.model : repoConfig.model,
@@ -538,7 +550,7 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
           tool: log.finding?.tool || 'sast', ruleId: log.finding?.rule_id || '', ruleName: '',
           file: log.finding?.file || '?', line: log.finding?.line || 0,
           severity: log.finding?.severity || 'UNKNOWN', confidence: '',
-          cwe: null, message: log.finding?.message || log.content, code: log.finding?.code || '',
+          cwe: null, message: `${sourceScopeLabel(log.finding)}${log.finding?.message || log.content}`, code: log.finding?.code || '',
           triage: triage,
           triageRationale: log.rationale || '',
         });
@@ -665,12 +677,13 @@ export default function ScanPage({ preloadRepo, onFindingsFound, onScanRunSaved,
 
                 {scanMode === 'repo' && (
                   <div className="scan-field">
-                    <label className="scan-label">Max Chunks ({repoConfig.maxChunks})</label>
-                    <input type="range" min={5} max={100} step={5}
+                    <label className="scan-label">Max Chunks ({repoConfig.maxChunks === 0 ? 'All' : repoConfig.maxChunks})</label>
+                    <input type="range" min={0} max={1000} step={25}
                       value={repoConfig.maxChunks}
                       onChange={e => setRepoConfig(c => ({ ...c, maxChunks: +e.target.value }))}
                       className="w-full accent-violet-500" disabled={running}
                     />
+                    <span className="text-xs text-slate-400">0 scans all eligible chunks and may take longer.</span>
                   </div>
                 )}
 

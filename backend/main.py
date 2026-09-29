@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, Optional, List
+from typing import AsyncGenerator, Dict, Optional, List, Any
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Header, Security, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,8 +43,17 @@ from . import database as db
 async def _check_models_ready(model: str, challenger_model: str):
     import urllib.request
     import urllib.error
+    requested_models = [name for name in (model, challenger_model) if name]
+    groq_models = [name for name in requested_models if name.startswith("groq/")]
+    missing_groq_key = bool(groq_models and not os.environ.get("GROQ_API_KEY"))
+    if missing_groq_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GROQ_API_KEY is required for the selected Groq model. Repository code will be sent to Groq.",
+        )
+    local_models = [name for name in requested_models if not name.startswith("groq/")]
     ollama_url = os.environ.get("OLLAMA_URL")
-    if not ollama_url:
+    if not ollama_url or not local_models:
         return
     try:
         req = urllib.request.Request(f"{ollama_url}/api/tags")
@@ -54,7 +63,7 @@ async def _check_models_ready(model: str, challenger_model: str):
         data = await asyncio.to_thread(fetch)
         models = [m.get("name") for m in data.get("models", [])]
         missing = []
-        for required in (model, challenger_model):
+        for required in local_models:
             if required and not any(m == required or m.startswith(f"{required}:") for m in models):
                 missing.append(required)
         if missing:
@@ -158,7 +167,7 @@ class RepoScanRequest(BaseModel):
     challengers: int = Field(default=2, ge=1, le=2)
     sast_tools: list[str] = Field(default=["bandit", "semgrep"])
     no_sast: bool = Field(default=False)
-    max_chunks: int = Field(default=20, ge=5, le=100)
+    max_chunks: int = Field(default=20, ge=0, le=1000, description="Discovery chunk limit; 0 scans all eligible chunks")
     sarif_file: Optional[str] = Field(default=None, description="Path to a SARIF file to ingest")
 
 class FeedbackRequest(BaseModel):
@@ -306,6 +315,7 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
 
     def _reader():
         try:
+            scan_status = "complete"
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -331,6 +341,8 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
                 
                 try:
                     payload = json.loads(line)
+                    if payload.get("type") == "DONE":
+                        scan_status = payload.get("scan_status", scan_status)
                     db.append_log(run_id, payload.get("type", "SYSTEM"), payload.get("agent", "runner"), line)
                 except Exception:
                     db.append_log(run_id, "SYSTEM", "runner", line)
@@ -340,16 +352,18 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
             process.stdout.close()
             process.wait()
             exit_code = process.returncode
+            run_status = "error" if exit_code != 0 else ("partial" if scan_status == "partial" else "done")
             event_type = "DONE" if exit_code == 0 else "ERROR"
             done_payload = json.dumps({
                 "type": event_type, "agent": "runner",
-                "content": f"Real-world scan finished — exit code {exit_code}",
+                "content": f"Real-world scan {run_status} — exit code {exit_code}",
                 "exit_code": exit_code,
+                "scan_status": scan_status,
             })
             db.append_log(run_id, event_type, "runner", done_payload)
-            db.update_run_status(run_id, "done" if exit_code == 0 else "error", exit_code)
+            db.update_run_status(run_id, run_status, exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
-            state.status = "done" if exit_code == 0 else "error"
+            state.status = run_status
 
         except Exception as exc:
             err = json.dumps({"type": "ERROR", "agent": "runner", "content": str(exc)})
@@ -455,6 +469,8 @@ async def start_repo_scan(request: RepoScanRequest):
         "workers": request.workers,
         "challengers": request.challengers,
         "sast_tools": request.sast_tools,
+        "no_sast": request.no_sast,
+        "max_chunks": request.max_chunks,
     }
     db.create_run(run_id, "real_world", config)
     state = RunState(run_id, config)
@@ -530,7 +546,7 @@ async def _event_stream(run_id: str) -> AsyncGenerator[str, None]:
         if not db_run:
             payload = json.dumps({"type": "ERROR", "agent": "server", "content": f"Run {run_id} not found"})
             yield f"data: {payload}\n\n"
-        elif db_run['status'] in ('done', 'error'):
+        elif db_run['status'] in ('done', 'partial', 'error'):
             # Tell client to close so it doesn't reconnect
             payload = json.dumps({"type": "DONE", "agent": "server", "content": "Replay finished"})
             yield f"data: {payload}\n\n"

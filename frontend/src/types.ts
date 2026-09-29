@@ -4,7 +4,7 @@ export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 export type FindingStatus = 'new' | 'confirmed' | 'fixed' | 'accepted_risk' | 'false_positive';
 export type LogType = 'PHASE' | 'WORKER' | 'CHALLENGER' | 'VERDICT' | 'SYSTEM' | 'ERROR' | 'DONE';
 export type AppMode = 'sandbox' | 'repo';
-export type ScanStatus = 'running' | 'done' | 'error' | 'queued';
+export type ScanStatus = 'running' | 'done' | 'partial' | 'error' | 'queued';
 
 // ── Finding ──────────────────────────────────────────────────────────────────
 
@@ -91,6 +91,7 @@ export interface LogEntry {
   verdict?: string;
   rationale?: string;
   metrics?: any;
+  scanStatus?: string;
 }
 
 // ── Triage Finding (parsed from SSE) ─────────────────────────────────────────

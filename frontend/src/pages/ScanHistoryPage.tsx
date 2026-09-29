@@ -4,7 +4,7 @@
 
 import React, { useState, useMemo } from 'react';
 import {
-  Play, Clock, CheckCircle2, XCircle, Loader2,
+  Play, Clock, CheckCircle2, XCircle, Loader2, AlertCircle,
   BarChart2, FlaskConical, GitBranch, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import type { ScanRun } from '../types';
@@ -14,6 +14,7 @@ import type { ScanRun } from '../types';
 const STATUS_CONFIG = {
   running: { label: 'Running', color: '#38bdf8', icon: <Loader2 size={13} className="spin" /> },
   done:    { label: 'Done',    color: '#34d399', icon: <CheckCircle2 size={13} /> },
+  partial: { label: 'Partial', color: '#fbbf24', icon: <AlertCircle size={13} /> },
   error:   { label: 'Error',   color: '#f87171', icon: <XCircle size={13} /> },
   queued:  { label: 'Queued',  color: '#fbbf24', icon: <Clock size={13} /> },
 };

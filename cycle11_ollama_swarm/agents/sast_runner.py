@@ -50,6 +50,47 @@ SEVERITY_MAP_SEMGREP = {
 }
 
 CWE_TAGS_SEMGREP = re.compile(r"CWE-\d+")
+BENCHMARK_DIRS = {"sandbox_target", "benchmark", "benchmarks", "benchmark_fixtures"}
+TEST_FIXTURE_DIRS = {"fixtures", "test_fixtures", "testdata"}
+
+
+def _source_scope(path: str) -> str:
+    parts = {part.lower() for part in path.replace("\\", "/").split("/")}
+    if parts & BENCHMARK_DIRS:
+        return "benchmark_fixture"
+    if parts & TEST_FIXTURE_DIRS:
+        return "test_fixture"
+    return "application"
+
+
+class SASTToolError(RuntimeError):
+    """A SAST tool could not produce a trustworthy result."""
+
+
+def _diagnostic(result: subprocess.CompletedProcess, limit: int = 1200) -> str:
+    text = (result.stderr or result.stdout or "").strip()
+    return text[:limit] if text else "no diagnostic output"
+
+
+def _parse_tool_json(result: subprocess.CompletedProcess, tool: str) -> dict:
+    for raw in (result.stdout or "", result.stderr or ""):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Some CLI versions print a status line before the JSON document.
+            first_object = raw.find("{")
+            last_object = raw.rfind("}")
+            try:
+                if first_object < 0 or last_object < first_object:
+                    continue
+                data = json.loads(raw[first_object:last_object + 1])
+            except json.JSONDecodeError:
+                continue
+        if isinstance(data, dict):
+            return data
+    raise SASTToolError(
+        f"{tool} returned invalid JSON (exit {result.returncode}): {_diagnostic(result)}"
+    )
 
 # ---------------------------------------------------------------------------
 # Bandit
@@ -65,14 +106,7 @@ def run_bandit(repo_root: str) -> list[dict]:
     Returns a list of unified SAST findings.
     """
     if not _bandit_available():
-        # Try installing bandit automatically
-        subprocess.run(
-            ["pip", "install", "bandit", "--quiet"],
-            capture_output=True, timeout=60
-        )
-        if not _bandit_available():
-            print("  [SAST] Bandit not available — skipping.", flush=True)
-            return []
+        raise SASTToolError("Bandit is not installed or is not on PATH.")
 
     print("  [SAST] Running Bandit …", flush=True)
     result = subprocess.run(
@@ -89,12 +123,11 @@ def run_bandit(repo_root: str) -> list[dict]:
     )
 
     # Bandit exits non-zero if it finds issues — that's fine
-    raw = result.stdout or result.stderr or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        print(f"  [SAST] Bandit: could not parse JSON output.", flush=True)
-        return []
+    data = _parse_tool_json(result, "Bandit")
+    if result.returncode not in (0, 1):
+        raise SASTToolError(f"Bandit exited with code {result.returncode}: {_diagnostic(result)}")
+    if data.get("errors"):
+        raise SASTToolError(f"Bandit reported scan errors: {str(data['errors'])[:1200]}")
 
     findings = []
     for r in data.get("results", []):
@@ -107,11 +140,13 @@ def run_bandit(repo_root: str) -> list[dict]:
             if cwe_id:
                 cwe_str = f"CWE-{cwe_id}"
 
+        rel_file = os.path.relpath(r.get("filename", ""), repo_root).replace("\\", "/")
         findings.append({
             "tool":       "bandit",
             "rule_id":    r.get("test_id", ""),
             "rule_name":  r.get("test_name", ""),
-            "file":       os.path.relpath(r.get("filename", ""), repo_root).replace("\\", "/"),
+            "file":       rel_file,
+            "source_scope": _source_scope(rel_file),
             "line":       r.get("line_number", 0),
             "col":        r.get("col_offset", 0),
             "severity":   SEVERITY_MAP_BANDIT.get(r.get("issue_severity", "LOW"), "LOW"),
@@ -140,13 +175,7 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
     Returns a list of unified SAST findings.
     """
     if not _semgrep_available():
-        subprocess.run(
-            ["pip", "install", "semgrep", "--quiet"],
-            capture_output=True, timeout=60
-        )
-        if not _semgrep_available():
-            print("  [SAST] Semgrep not available — skipping.", flush=True)
-            return []
+        raise SASTToolError("Semgrep is not installed or is not on PATH.")
 
     if rulesets is None:
         rulesets = ["p/security-audit", "p/owasp-top-ten"]
@@ -171,12 +200,23 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
         timeout=300,
     )
 
-    raw = result.stdout or ""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        print(f"  [SAST] Semgrep: could not parse JSON output.", flush=True)
-        return []
+    data = _parse_tool_json(result, "Semgrep")
+
+    # Semgrep uses exit code 1 when it finds matches. Exit code 2 indicates a
+    # scan error, and JSON can still contain partial results in that case.
+    if result.returncode not in (0, 1):
+        raise SASTToolError(
+            f"Semgrep exited with code {result.returncode}: {_diagnostic(result)}"
+        )
+    errors = data.get("errors", [])
+    if errors:
+        if not isinstance(errors, list):
+            errors = [errors]
+        details = "; ".join(
+            str(error.get("message", error)) if isinstance(error, dict) else str(error)
+            for error in errors[:5]
+        )
+        raise SASTToolError(f"Semgrep reported {len(errors)} scan error(s): {details[:1200]}")
 
     findings = []
     for r in data.get("results", []):
@@ -199,6 +239,7 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
             "rule_id":    r.get("check_id", ""),
             "rule_name":  r.get("check_id", "").split(".")[-1],
             "file":       rel_file,
+            "source_scope": _source_scope(rel_file),
             "line":       r.get("start", {}).get("line", 0),
             "col":        r.get("start", {}).get("col", 0),
             "severity":   severity,
@@ -218,9 +259,9 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
 # Unified runner
 # ---------------------------------------------------------------------------
 
-def run_all_sast(repo_root: str, tools: Optional[list[str]] = None) -> list[dict]:
+def run_all_sast_detailed(repo_root: str, tools: Optional[list[str]] = None) -> tuple[list[dict], dict[str, dict]]:
     """
-    Run all available SAST tools and return a combined, deduplicated finding list.
+    Run all selected SAST tools and return findings plus per-tool status.
 
     Args:
         repo_root: Absolute path to the repository root.
@@ -230,12 +271,21 @@ def run_all_sast(repo_root: str, tools: Optional[list[str]] = None) -> list[dict
         tools = ["bandit", "semgrep"]
 
     all_findings: list[dict] = []
-
-    if "bandit" in tools:
-        all_findings.extend(run_bandit(repo_root))
-
-    if "semgrep" in tools:
-        all_findings.extend(run_semgrep(repo_root))
+    statuses: dict[str, dict] = {}
+    runners = {"bandit": run_bandit, "semgrep": run_semgrep}
+    for tool in tools:
+        runner = runners.get(tool.lower())
+        if runner is None:
+            statuses[tool] = {"status": "failed", "finding_count": 0, "error": "Unsupported SAST tool"}
+            continue
+        try:
+            findings = runner(repo_root)
+        except Exception as exc:
+            statuses[tool] = {"status": "failed", "finding_count": 0, "error": str(exc)}
+            print(f"  [SAST] {tool}: FAILED — {exc}", flush=True)
+            continue
+        all_findings.extend(findings)
+        statuses[tool] = {"status": "complete", "finding_count": len(findings), "error": None}
 
     # Deduplicate by (file, line, rule_id)
     seen: set[tuple] = set()
@@ -255,7 +305,13 @@ def run_all_sast(repo_root: str, tools: Optional[list[str]] = None) -> list[dict
         f"{len(deduped)} after deduplication.",
         flush=True,
     )
-    return deduped
+    return deduped, statuses
+
+
+def run_all_sast(repo_root: str, tools: Optional[list[str]] = None) -> list[dict]:
+    """Backward-compatible findings-only wrapper."""
+    findings, _ = run_all_sast_detailed(repo_root, tools)
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +323,7 @@ def format_sast_finding_for_prompt(finding: dict) -> str:
     lines = [
         f"SAST ALERT — {finding['tool'].upper()} / {finding['rule_id']}",
         f"  File:       {finding['file']}:{finding['line']}",
+        f"  Source:     {finding.get('source_scope', 'application')}",
         f"  Severity:   {finding['severity']}  (Confidence: {finding['confidence']})",
         f"  CWE:        {finding.get('cwe') or 'not mapped'}",
         f"  Message:    {finding['message']}",

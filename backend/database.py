@@ -166,7 +166,7 @@ def create_run(run_id: str, scan_type: str, config: Dict[str, Any], started_at: 
     return {"run_id": run_id, "status": "running", "scan_type": scan_type, **config, "started_at": started_at}
 
 def update_run_status(run_id: str, status: str, exit_code: Optional[int] = None):
-    completed_at = time.time() if status in ("done", "error") else None
+    completed_at = time.time() if status in ("done", "partial", "error") else None
     with _db_lock:
         conn = _get_connection()
         try:
@@ -411,4 +411,3 @@ def list_frontend_runs() -> List[Dict[str, Any]]:
             return [json.loads(row["run_json"]) for row in cur.fetchall()]
         finally:
             _release_connection(conn)
-

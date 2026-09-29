@@ -66,16 +66,28 @@ class LLMClient:
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.groq_api_key}"
+                "Authorization": f"Bearer {self.groq_api_key}",
+                "User-Agent": "Mozilla/5.0"
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read())
-                return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            raise RuntimeError(f"Groq API call failed: {e}") from e
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read())
+                    return data["choices"][0]["message"]["content"].strip()
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 4:
+                    import time
+                    time.sleep(2 ** attempt + 3)
+                    continue
+                raise RuntimeError(f"Groq API call failed: HTTP Error {e.code}: {e.read().decode('utf-8', errors='replace')}") from e
+            except Exception as e:
+                if attempt < 4:
+                    import time
+                    time.sleep(2 ** attempt + 3)
+                    continue
+                raise RuntimeError(f"Groq API call failed: {e}") from e
 
     def _generate_ollama(self, prompt: str, system: str = "", temperature: float = 0.3) -> Optional[str]:
         payload = json.dumps({
@@ -132,19 +144,28 @@ class LLMClient:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.groq_api_key}",
-                "User-Agent": "Swarm-Security-Scanner/1.0"
+                "User-Agent": "Mozilla/5.0"
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read())
-                return data["choices"][0]["message"]["content"].strip()
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode('utf-8', errors='replace')
-            raise RuntimeError(f"Groq API HTTP {e.code}: {err_body}") from e
-        except Exception as e:
-            raise RuntimeError(f"Groq API chat call failed: {e}") from e
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read())
+                    return data["choices"][0]["message"]["content"].strip()
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 4:
+                    import time
+                    time.sleep(2 ** attempt + 3)
+                    continue
+                err_body = e.read().decode('utf-8', errors='replace')
+                raise RuntimeError(f"Groq API HTTP {e.code}: {err_body}") from e
+            except Exception as e:
+                if attempt < 4:
+                    import time
+                    time.sleep(2 ** attempt + 3)
+                    continue
+                raise RuntimeError(f"Groq API chat call failed: {e}") from e
 
     def _chat_ollama(self, messages: list, temperature: float = 0.3, num_predict: int = 1024) -> Optional[str]:
         payload = json.dumps({

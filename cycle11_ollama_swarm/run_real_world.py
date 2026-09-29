@@ -20,11 +20,11 @@ Key differences from run_cycle11.py (research harness):
   - Full metrics engine for real-world benchmarking
 
 Usage:
-  python run_real_world.py --repo https://github.com/org/repo \\
-      --model llama3.2 --challenger-model qwen2.5-coder:7b \\
+  python run_real_world.py --repo https://github.com/org/repo \
+      --model llama3.2 --challenger-model qwen2.5-coder:7b \
       --workers 5 --sast bandit semgrep
 
-  python run_real_world.py --repo ./path/to/local/repo \\
+  python run_real_world.py --repo ./path/to/local/repo \
       --model llama3.2 --no-sast
 """
 
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -52,7 +53,7 @@ from agents.llm_client import LLMClient
 from agents.repo_ingester import (
     ingest_repository, repo_map_to_summary, RepoMap, CodeChunk,
 )
-from agents.sast_runner import run_all_sast, format_sast_finding_for_prompt, format_sast_summary
+from agents.sast_runner import run_all_sast_detailed, format_sast_finding_for_prompt, format_sast_summary
 from agents.metrics_engine import MetricsEngine, GroundTruthEntry
 from agents.schema_validator import filter_findings
 from agents.memory import get_conn, make_db_path, set_meta, record_finding
@@ -319,6 +320,7 @@ def _parse_findings_from_response(response: str, chunk: CodeChunk) -> list[dict]
             current = {
                 "file": chunk.file_path,
                 "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
                 "language": chunk.language,
             }
         elif line.startswith("Title:"):
@@ -336,7 +338,7 @@ def _parse_findings_from_response(response: str, chunk: CodeChunk) -> list[dict]
         elif line.startswith("Severity:"):
             raw_sev = line.split(":", 1)[1].strip().lower()
             if raw_sev in ("critical", "high", "medium", "low", "info"):
-                current["severity"] = raw_sev
+                current["severity"] = raw_sev.upper()
         elif line == "---":
             if current and current.get("title"):
                 findings.append(current)
@@ -358,13 +360,30 @@ def _dynamic_filter_findings(
     for f in findings:
         # Field completeness
         missing = [
-            field for field in ("location", "path", "property", "attacker_input", "consequence")
-            if not f.get(field, "").strip()
+            field for field in ("title", "location", "path", "property", "attacker_input", "consequence")
+            if not str(f.get(field) or "").strip()
         ]
         if missing:
             f["rejection_reason"] = f"MISSING_FIELDS: {', '.join(missing)}"
             rejected.append(f)
             continue
+
+        reported_path = str(f["path"]).replace("\\", "/").removeprefix("./")
+        source_path = str(f.get("file", "")).replace("\\", "/").removeprefix("./")
+        if reported_path != source_path:
+            f["rejection_reason"] = "LOCATION_MISMATCH: reported path does not match the analyzed file"
+            rejected.append(f)
+            _EMIT("SYSTEM", agent_id, f"[SCHEMA-GATE] Dropped: {f.get('title', '?')[:60]} — {f['rejection_reason']}")
+            continue
+
+        location_match = re.fullmatch(r"\s*(?:line\s*)?(\d+)\s*", str(f["location"]), re.IGNORECASE)
+        location_line = int(location_match.group(1)) if location_match else None
+        if location_line is None or not (f["start_line"] <= location_line <= f["end_line"]):
+            f["rejection_reason"] = "LOCATION_MISMATCH: line is outside the analyzed code chunk"
+            rejected.append(f)
+            _EMIT("SYSTEM", agent_id, f"[SCHEMA-GATE] Dropped: {f.get('title', '?')[:60]} — {f['rejection_reason']}")
+            continue
+        f["validated_line"] = location_line
 
         # Dynamic hallucination check
         combined = f"{f.get('path','')} {f.get('consequence','')} {f.get('attacker_input','')}".lower()
@@ -388,11 +407,22 @@ def _dynamic_filter_findings(
 def _chunk_risk_score(chunk: CodeChunk) -> int:
     score = 0
     path = chunk.file_path.lower()
-    if any(k in path for k in ["auth", "login", "security", "crypto", ".github", "config", "docker", "jwt", "secret", "password", "oauth"]):
+    if any(k in path for k in ["auth", "login", "security", "crypto", ".github", "docker", "jwt", "secret", "password", "oauth"]):
         score += 10
-    if chunk.chunk_type in ["config", "module"]:
+    if chunk.chunk_type == "module":
         score += 5
     return score
+
+
+_DISCOVERY_FIXTURE_DIRS = {
+    "sandbox_target", "benchmark", "benchmarks", "benchmark_fixtures",
+    "fixtures", "test_fixtures", "testdata",
+}
+
+
+def _is_discovery_fixture(chunk: CodeChunk) -> bool:
+    path_parts = {part.lower() for part in chunk.file_path.replace("\\", "/").split("/")}
+    return bool(path_parts & _DISCOVERY_FIXTURE_DIRS)
 
 def run_swarm_discovery(
     client: LLMClient,
@@ -405,15 +435,23 @@ def run_swarm_discovery(
 ) -> list[dict]:
     repo_summary = repo_map_to_summary(repo_map)
     
-    chunks_to_scan = sorted(chunks, key=_chunk_risk_score, reverse=True)[:max_chunks]
-    
-    _EMIT("PHASE", "orchestrator", f"PHASE 3 — DISCOVERY: Hunting for novel flaws in {len(chunks_to_scan)} highest-risk chunks")
+    eligible_chunks = [chunk for chunk in chunks if not _is_discovery_fixture(chunk)]
+    excluded_fixture_count = len(chunks) - len(eligible_chunks)
+    ranked_chunks = sorted(eligible_chunks, key=_chunk_risk_score, reverse=True)
+    chunks_to_scan = ranked_chunks if max_chunks == 0 else ranked_chunks[:max_chunks]
+    coverage = len(chunks_to_scan) / len(eligible_chunks) if eligible_chunks else 1.0
+
+    _EMIT(
+        "PHASE", "orchestrator",
+        f"PHASE 3 — DISCOVERY: Scanning {len(chunks_to_scan)}/{len(eligible_chunks)} eligible chunks "
+        f"({coverage:.1%} coverage); excluded {excluded_fixture_count} benchmark/fixture chunks"
+    )
 
     discovery_results = []
     
     for i, chunk in enumerate(chunks_to_scan):
         _EMIT("WORKER", "orchestrator", f"[{i+1}/{len(chunks_to_scan)}] Scanning {chunk.file_path}")
-        prompt = textwrap.dedent(f"""\\
+        prompt = textwrap.dedent(f"""\
             You are a senior security researcher looking for complex logic flaws.
             {repo_summary}
             
@@ -421,7 +459,11 @@ def run_swarm_discovery(
             File: {chunk.file_path}
             {chunk.content}
             
-            Find exploitable vulnerabilities. Output each finding in this format:
+            Report only vulnerabilities supported by this code. Location must be the
+            absolute line number in the repository file; this chunk covers lines
+            {chunk.start_line}-{chunk.end_line}. Do not report a weakness based only on
+            a filename, framework, configuration format, or hypothetical behavior.
+            Output each finding in this format:
             FINDING:
             Title: <title>
             Location: <line number>
@@ -445,7 +487,7 @@ def run_swarm_discovery(
         for f in valid_findings:
             f["chunk_idx"] = i
             try:
-                line_num = int(str(f.get("location")).split()[0])
+                line_num = int(f["validated_line"])
             except (ValueError, TypeError, IndexError):
                 line_num = chunk.start_line
             # Transform to standard triage finding format
@@ -453,8 +495,11 @@ def run_swarm_discovery(
                 "file": chunk.file_path,
                 "line": line_num,
                 "message": f.get("title"),
+                "property": f.get("property"),
+                "attacker_input": f.get("attacker_input"),
+                "consequence": f.get("consequence"),
                 "severity": f.get("severity", "MEDIUM"),
-                "code": f.get("snippet", chunk.content),
+                "code": chunk.content,
                 "tool": "swarm_discovery",
                 "rule_id": "discovery-001"
             }
@@ -474,36 +519,61 @@ def run_swarm_challenge(
     confirmed = []
     for i, f in enumerate(findings):
         _EMIT("CHALLENGER", "orchestrator", f"[{i+1}/{len(findings)}] Challenging: {f.get('message')}")
-        context_chunk = next((c for c in chunks if f["file"] in c.file_path), None)
-        content = context_chunk.content if context_chunk else ""
+        context_chunk = next(
+            (c for c in chunks if c.file_path == f.get("file") and c.start_line <= f.get("line", 0) <= c.end_line),
+            next((c for c in chunks if c.file_path == f.get("file")), None),
+        )
+        content = ""
+        if context_chunk:
+            source_lines = context_chunk.content.splitlines()
+            relative_line = f.get("line", context_chunk.start_line) - context_chunk.start_line
+            first_line = max(0, relative_line - 8)
+            last_line = min(len(source_lines), relative_line + 9)
+            content = "\n".join(
+                f"{context_chunk.start_line + line_idx}: {source_lines[line_idx]}"
+                for line_idx in range(first_line, last_line)
+            )
         prompt = textwrap.dedent(f"""\
-            You are an adversarial reviewer. Is this finding a true positive?
+            You are an adversarial security reviewer. Verify the claim against the supplied source.
             Finding: {f.get('message')}
+            Claimed vulnerability: {f.get('property', 'not specified')}
+            Claimed attacker-controlled input: {f.get('attacker_input', 'not specified')}
+            Claimed consequence: {f.get('consequence', 'not specified')}
             Location: {f.get('file')}:{f.get('line')}
+
+            Confirm only if this code supports a concrete path from attacker-controlled input
+            to the claimed unsafe operation and consequence. If that path is not visible or
+            the claim relies on assumptions, return FALSE_POSITIVE or INCONCLUSIVE.
             
             Code:
             {content[:2000]}
             
             Reply with EXACTLY:
-            VERDICT: TRUE_POSITIVE or FALSE_POSITIVE
-            RATIONALE: <reason>
+            VERDICT: TRUE_POSITIVE, FALSE_POSITIVE, or INCONCLUSIVE
+            RATIONALE: <specific source evidence, or why the claim is unsupported>
         """)
-        
         agent_verdicts = []
+        agent_rationales = []
         for c_idx in range(num_challengers):
             try:
                 response = client.generate(prompt=prompt, temperature=0.1 + (0.1 * c_idx))
                 metrics.record_token_usage(len(prompt), len(response or ""))
             except Exception:
                 agent_verdicts.append("INCONCLUSIVE")
+                agent_rationales.append("Challenger request failed")
                 continue
-                
-            if "FALSE_POSITIVE" in response:
-                agent_verdicts.append("FALSE_POSITIVE")
-            elif "TRUE_POSITIVE" in response:
-                agent_verdicts.append("TRUE_POSITIVE")
-            else:
-                agent_verdicts.append("INCONCLUSIVE")
+
+            verdict_match = re.search(
+                r"(?im)^\s*VERDICT:\s*(TRUE_POSITIVE|FALSE_POSITIVE|INCONCLUSIVE)\s*$",
+                response or "",
+            )
+            rationale_match = re.search(r"(?im)^\s*RATIONALE:\s*(.+?)\s*$", response or "")
+            rationale = rationale_match.group(1).strip() if rationale_match else ""
+            verdict = verdict_match.group(1).upper() if verdict_match else "INCONCLUSIVE"
+            if verdict == "TRUE_POSITIVE" and len(rationale) < 20:
+                verdict = "INCONCLUSIVE"
+            agent_verdicts.append(verdict)
+            agent_rationales.append(rationale or "No structured rationale provided")
                 
         if any(v == "FALSE_POSITIVE" for v in agent_verdicts):
             _EMIT("VERDICT", "challenger", f"Refuted: {f.get('message')}")
@@ -511,7 +581,8 @@ def run_swarm_challenge(
         elif all(v == "TRUE_POSITIVE" for v in agent_verdicts) and agent_verdicts:
             _EMIT("VERDICT", "challenger", f"Confirmed: {f.get('message')}")
             metrics.record_verdict("TP", f)
-            f["triage_rationale"] = "Confirmed by all challengers"
+            f["triage_verdict"] = "TP"
+            f["triage_rationale"] = " | ".join(agent_rationales)
             confirmed.append(f)
         else:
             _EMIT("VERDICT", "challenger", f"Inconclusive: {f.get('message')}")
@@ -545,7 +616,7 @@ def main():
     parser.add_argument("--sarif-file", default=None,
                         help="Path to an external SARIF file to ingest findings from")
     parser.add_argument("--max-chunks", type=int, default=20,
-                        help="Max code chunks per discovery agent")
+                        help="Max discovery chunks; use 0 to scan all eligible chunks")
     parser.add_argument("--diff-json", default=None,
                         help="JSON string of modified files and lines for differential scans")
     parser.add_argument("--clone-to", default=None,
@@ -555,6 +626,8 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:11434",
                         help="Ollama API base URL")
     args = parser.parse_args()
+    if args.max_chunks < 0:
+        parser.error("--max-chunks must be 0 or greater")
 
     run_id = str(int(time.time()))
     import tempfile
@@ -587,21 +660,25 @@ def main():
     # ── Metrics engine setup ───────────────────────────────────────────────
     metrics = MetricsEngine(run_id=run_id, repo_name=repo_map.repo_name)
 
-    # ── Ollama connectivity check ──────────────────────────────────────────
+    # ── Model provider preflight ───────────────────────────────────────────
     client = LLMClient(model=args.model, base_url=args.url)
-    available = client.list_models()
-    if not available:
-        _EMIT("ERROR", "runner", f"Cannot reach Ollama at {args.url}. Is 'ollama serve' running?")
-        sys.exit(1)
-    if args.model not in available:
-        _EMIT("ERROR", "runner", f"Model '{args.model}' not found in Ollama. Available: {available}")
-        sys.exit(1)
-    _EMIT("SYSTEM", "runner", f"Ollama OK — using {args.model}")
-
     challenger_client = LLMClient(model=args.challenger_model, base_url=args.url)
+    for role, model_client in (("discovery", client), ("challenger", challenger_client)):
+        provider = "Groq API" if model_client.is_groq else "local Ollama"
+        _EMIT("SYSTEM", "runner", f"Model provider: {provider} — {role} {model_client.model}")
+        if model_client.is_groq:
+            continue
+        available = model_client.list_models()
+        if not available:
+            _EMIT("ERROR", "runner", f"Cannot reach Ollama at {args.url}. Is 'ollama serve' running?")
+            sys.exit(1)
+        if not any(name == model_client.model or name.startswith(f"{model_client.model}:") for name in available):
+            _EMIT("ERROR", "runner", f"Model '{model_client.model}' not found in Ollama. Available: {available}")
+            sys.exit(1)
 
     # ── Phase 1: SAST Baseline ─────────────────────────────────────────────
     sast_findings: list[dict] = []
+    sast_statuses: dict[str, dict] = {}
     _EMIT("PHASE", "orchestrator", "PHASE 1 — SAST/SARIF: Gathering static analysis baseline")
 
     if args.sarif_file and os.path.exists(args.sarif_file):
@@ -613,8 +690,15 @@ def main():
 
     if not args.no_sast and args.sast:
         _EMIT("SYSTEM", "sast", f"Running internal SAST tools: {', '.join(args.sast)}")
-        internal_sast = run_all_sast(repo_map.root, tools=args.sast)
+        internal_sast, sast_statuses = run_all_sast_detailed(repo_map.root, tools=args.sast)
         sast_findings.extend(internal_sast)
+    else:
+        sast_statuses["sast"] = {
+            "status": "skipped",
+            "finding_count": 0,
+            "error": "SAST was disabled by scan configuration",
+        }
+        _EMIT("SYSTEM", "sast", "SAST skipped by scan configuration; results are incomplete")
         
     if sast_findings:
         metrics.record_sast_results(sast_findings)
@@ -623,6 +707,13 @@ def main():
               + format_sast_summary(sast_findings).replace("\n", " "))
     else:
         _EMIT("SYSTEM", "sast", "Phase 1 complete: 0 findings")
+
+    failed_sast = {tool: status for tool, status in sast_statuses.items() if status["status"] == "failed"}
+    if failed_sast:
+        for tool, status in failed_sast.items():
+            _EMIT("ERROR", "sast", f"{tool} failed; SAST results are incomplete: {status['error']}")
+    elif sast_statuses and all(status["status"] == "complete" for status in sast_statuses.values()):
+        _EMIT("SYSTEM", "sast", "All selected SAST tools completed successfully")
 
     # ── Phase 2: Swarm Investigation ───────────────────────────────────────
     db_path = make_db_path(ROOT, cycle_key="rw")
@@ -671,6 +762,39 @@ def main():
     metrics.save(metrics_path)
     _EMIT("SYSTEM", "metrics", f"Metrics saved to {metrics_path}")
 
+    discovery_eligible = sum(1 for chunk in chunks if not _is_discovery_fixture(chunk))
+    discovery_scanned = min(discovery_eligible, args.max_chunks) if args.max_chunks else discovery_eligible
+    partial_reasons = []
+    if failed_sast:
+        partial_reasons.append("incomplete SAST results")
+    elif any(status["status"] == "skipped" for status in sast_statuses.values()):
+        partial_reasons.append("SAST skipped")
+    if discovery_scanned < discovery_eligible:
+        partial_reasons.append("limited discovery coverage")
+    scan_metadata = {
+        "run_id": run_id,
+        "repo": args.repo,
+        "status": "partial" if partial_reasons else "complete",
+        "partial_reasons": partial_reasons,
+        "discovery_model": args.model,
+        "challenger_model": args.challenger_model,
+        "discovery_model_provider": "groq" if client.is_groq else "ollama",
+        "challenger_model_provider": "groq" if challenger_client.is_groq else "ollama",
+        "sast_status": sast_statuses,
+        "discovery": {
+            "total_chunks": len(chunks),
+            "eligible_chunks": discovery_eligible,
+            "excluded_fixture_chunks": len(chunks) - discovery_eligible,
+            "scanned_chunks": discovery_scanned,
+            "coverage_percent": round(100 * discovery_scanned / discovery_eligible, 2) if discovery_eligible else 100.0,
+            "coverage_complete": discovery_scanned == discovery_eligible,
+            "limit": args.max_chunks or "all",
+        },
+    }
+    metadata_path = output_dir / f"real_world_{run_id}_scan_metadata.json"
+    metadata_path.write_text(json.dumps(scan_metadata, indent=2), encoding="utf-8")
+    _EMIT("SYSTEM", "runner", f"Scan metadata saved to {metadata_path}")
+
     # Save SAST findings
     if sast_findings:
         sast_path = output_dir / f"real_world_{run_id}_sast.json"
@@ -678,7 +802,12 @@ def main():
         _EMIT("SYSTEM", "sast", f"SAST findings saved to {sast_path}")
 
     conn.close()
-    _EMIT("DONE", "runner", f"Real-World scan complete — Run {run_id}")
+    completion = f"completed with {' and '.join(partial_reasons)}" if partial_reasons else "complete"
+    _EMIT(
+        "DONE", "runner", f"Real-World scan {completion} — Run {run_id}",
+        scan_status="partial" if partial_reasons else "complete",
+        partial_reasons=partial_reasons,
+    )
 
 
 if __name__ == "__main__":
