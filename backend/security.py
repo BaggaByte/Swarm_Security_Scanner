@@ -169,7 +169,7 @@ def validate_remote_git_url(url_str: str) -> str:
             if is_ip_blocked(ip_str):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Access to internal network address ({hostname} -> {ip_str}) is prohibited.",
+                    detail="Access to internal network address is prohibited.",
                 )
     except socket.gaierror:
         raise HTTPException(
@@ -201,7 +201,7 @@ def validate_local_scan_path(path_str: str) -> str:
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid directory path: {str(e)}",
+            detail="Invalid directory path.",
         )
 
     clean_path_lower = clean_path.lower()
