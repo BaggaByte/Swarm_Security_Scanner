@@ -1092,6 +1092,56 @@ async def github_webhook(
     
     return {"status": "ok", "message": f"Webhook processed for {repo_name}"}
 
+# ---------------------------------------------------------------------------
+# Benchmark Report API
+# ---------------------------------------------------------------------------
+
+_BENCHMARK_REPORT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "results", "cve_benchmark", "cve_benchmark_report.json"
+)
+_BENCHMARK_MANIFEST_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "benchmarks", "cve_manifest.json"
+)
+
+@app.get("/api/benchmark", dependencies=[Depends(require_api_key)])
+async def get_benchmark_report():
+    """Return the latest CVE benchmark report plus manifest metadata."""
+    result: dict = {
+        "report": None,
+        "manifest": None,
+        "report_available": False,
+        "manifest_cases": 0,
+    }
+    if os.path.exists(_BENCHMARK_MANIFEST_PATH):
+        try:
+            with open(_BENCHMARK_MANIFEST_PATH, encoding="utf-8") as f:
+                manifest = json.load(f)
+            result["manifest"] = manifest
+            result["manifest_cases"] = len(manifest.get("cases", []))
+        except Exception:
+            pass
+    if os.path.exists(_BENCHMARK_REPORT_PATH):
+        try:
+            with open(_BENCHMARK_REPORT_PATH, encoding="utf-8") as f:
+                report = json.load(f)
+            result["report"] = report
+            result["report_available"] = True
+        except Exception:
+            pass
+    return result
+
+@app.get("/api/benchmark/run-command", dependencies=[Depends(require_api_key)])
+async def get_benchmark_run_command():
+    """Return the CLI command to run the benchmark harness."""
+    return {
+        "command": "python cycle11_ollama_swarm/benchmark_cves.py --manifest benchmarks/cve_manifest.json --output-dir results/cve_benchmark",
+        "notes": [
+            "Set OLLAMA_URL, GROQ_API_KEY, or NVIDIA_API_KEY in .env as needed.",
+            "Use --max-chunks to limit discovery per CVE for faster iteration.",
+            "Results write incrementally to results/cve_benchmark/cve_benchmark_report.json.",
+        ],
+    }
+
 # Serve the frontend
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse

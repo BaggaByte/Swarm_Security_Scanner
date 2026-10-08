@@ -7,7 +7,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import {
   LayoutDashboard, ShieldAlert, History, Database,
   ScanLine, ChevronLeft, ChevronRight, Settings,
-  Zap, X, Menu,
+  Zap, X, Menu, Award,
 } from 'lucide-react';
 
 import { useStore } from './useStore';
@@ -19,11 +19,12 @@ const ScanHistoryPage = React.lazy(() => import('./pages/ScanHistoryPage'));
 const RepositoriesPage = React.lazy(() => import('./pages/RepositoriesPage'));
 const ScanPage = React.lazy(() => import('./pages/ScanPage'));
 const ArchitecturePage = React.lazy(() => import('./pages/ArchitecturePage'));
+const BenchmarkPage = React.lazy(() => import('./pages/BenchmarkPage'));
 
 
 // ── Nav items ──────────────────────────────────────────────────────────────────
 
-type PageId = 'dashboard' | 'architecture' | 'findings' | 'scans' | 'repositories' | 'scan';
+type PageId = 'dashboard' | 'architecture' | 'findings' | 'scans' | 'repositories' | 'scan' | 'benchmark';
 
 interface NavItem {
   id: PageId;
@@ -66,6 +67,11 @@ const NAV_ITEMS: NavItem[] = [
     id: 'scan',
     label: 'New Scan',
     icon: <ScanLine size={17} />,
+  },
+  {
+    id: 'benchmark',
+    label: 'CVE Benchmark',
+    icon: <Award size={17} />,
   },
 ];
 
@@ -175,7 +181,7 @@ export default function App() {
         {/* Bottom items */}
         <div className="sidebar__footer">
           <div className="sidebar__version">
-            {!collapsed && <span>v1.0 · Phase 1</span>}
+            {!collapsed && <span>v1.0 · Phase 1 <span style={{ color: '#fbbf24', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em' }}>VALIDATE</span></span>}
           </div>
         </div>
       </aside>
@@ -262,6 +268,9 @@ export default function App() {
                 onScanRunSaved={handleScanRunSaved}
                 onRepoAdded={handleRepoAdded}
               />
+            )}
+            {activePage === 'benchmark' && (
+              <BenchmarkPage />
             )}
           </React.Suspense>
         </main>
