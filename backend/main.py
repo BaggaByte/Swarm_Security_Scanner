@@ -27,9 +27,9 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, Optional, List, Any
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Header, Security, status, Depends
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Header, Security, status, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 # Security & DB modules
@@ -40,6 +40,7 @@ from .security import (
     verify_github_webhook_signature,
 )
 from . import database as db
+from . import exporter
 
 async def _check_models_ready(model: str, challenger_model: str):
     import urllib.request
@@ -556,6 +557,79 @@ def get_frontend_runs():
 def post_frontend_runs(runs: List[Dict[str, Any]]):
     db.save_frontend_runs(runs)
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1.3: Export & Multi-Scan Comparison Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/export/sarif", dependencies=[Security(require_api_key)])
+def export_sarif(
+    repository: Optional[str] = Query(None, description="Filter by repository name"),
+    run_id: Optional[str] = Query(None, description="Filter by run ID"),
+):
+    """Export findings as an OASIS SARIF v2.1.0 report."""
+    findings = db.list_findings()
+    if repository:
+        findings = [f for f in findings if f.get("repository") == repository]
+    if run_id:
+        findings = [f for f in findings if f.get("scanId") == run_id]
+    
+    run_meta = db.get_run(run_id) if run_id else None
+    sarif_data = exporter.export_to_sarif(findings, run_meta)
+    return sarif_data
+
+
+@app.get("/api/export/csv", dependencies=[Security(require_api_key)])
+def export_csv(
+    repository: Optional[str] = Query(None, description="Filter by repository name"),
+    run_id: Optional[str] = Query(None, description="Filter by run ID"),
+):
+    """Export findings as a CSV spreadsheet."""
+    findings = db.list_findings()
+    if repository:
+        findings = [f for f in findings if f.get("repository") == repository]
+    if run_id:
+        findings = [f for f in findings if f.get("scanId") == run_id]
+    
+    csv_content = exporter.export_to_csv(findings)
+    filename = f"swarm_findings_{run_id or 'all'}_{int(time.time())}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/export/html", dependencies=[Security(require_api_key)])
+def export_html(
+    repository: Optional[str] = Query(None, description="Filter by repository name"),
+    run_id: Optional[str] = Query(None, description="Filter by run ID"),
+):
+    """Export findings as a standalone styled HTML audit report."""
+    findings = db.list_findings()
+    if repository:
+        findings = [f for f in findings if f.get("repository") == repository]
+    if run_id:
+        findings = [f for f in findings if f.get("scanId") == run_id]
+    
+    run_meta = db.get_run(run_id) if run_id else {"repo": repository or "All Repositories", "run_id": run_id or "All"}
+    html_content = exporter.export_to_html(findings, run_meta)
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/api/diff", dependencies=[Security(require_api_key)])
+def diff_scan_runs(
+    scan_a: str = Query(..., description="Baseline run ID"),
+    scan_b: str = Query(..., description="Target run ID to compare against"),
+):
+    """Compare findings between two scan runs (new, fixed, persistent)."""
+    findings = db.list_findings()
+    findings_a = [f for f in findings if f.get("scanId") == scan_a]
+    findings_b = [f for f in findings if f.get("scanId") == scan_b]
+    
+    return exporter.diff_scans(findings_a, findings_b)
+
 
 
 async def _event_stream(run_id: str) -> AsyncGenerator[str, None]:

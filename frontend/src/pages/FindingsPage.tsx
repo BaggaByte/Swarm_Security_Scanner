@@ -6,7 +6,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import {
   Search, Filter, ChevronDown, ChevronUp, CheckCircle,
   XCircle, AlertOctagon, ShieldOff, Clock, FileCode,
-  GitCommit, User, RotateCcw, ExternalLink,
+  GitCommit, User, RotateCcw, ExternalLink, Download, FileText,
 } from 'lucide-react';
 import type { Finding, FindingStatus, Severity } from '../types';
 import { useStore } from '../useStore';
@@ -355,10 +355,52 @@ export default function FindingsPage({ findings, onStatusChange, onOwnerChange, 
   const [sortAsc, setSortAsc] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [selected, setSelected] = useState<Finding | null>(null);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   
+  const { apiKey } = useStore();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 50;
+
+  const handleExport = async (format: 'sarif' | 'csv' | 'html') => {
+    try {
+      setIsExporting(true);
+      const res = await fetch(`/api/export/${format}`, {
+        headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {},
+      });
+      if (!res.ok) throw new Error('Export request failed');
+      
+      if (format === 'sarif') {
+        const data = await res.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `swarm_findings_${Date.now()}.sarif`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } else if (format === 'csv') {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `swarm_findings_${Date.now()}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } else if (format === 'html') {
+        const htmlText = await res.text();
+        const blob = new Blob([htmlText], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+      }
+    } catch (err) {
+      console.error('Export error:', err);
+    } finally {
+      setIsExporting(false);
+      setShowExportMenu(false);
+    }
+  };
 
   const uniqueRepos = useMemo(() => Array.from(new Set(findings.map(f => f.repository))), [findings]);
 
@@ -447,6 +489,62 @@ export default function FindingsPage({ findings, onStatusChange, onOwnerChange, 
             <RotateCcw size={12} /> Clear
           </button>
         )}
+
+        <div style={{ position: 'relative', marginLeft: 'auto' }}>
+          <button
+            onClick={() => setShowExportMenu(v => !v)}
+            disabled={isExporting || findings.length === 0}
+            className="filter-toggle"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#38bdf818', color: '#38bdf8', borderColor: '#38bdf844' }}
+          >
+            <Download size={14} /> {isExporting ? 'Exporting…' : 'Export Reports'} <ChevronDown size={12} />
+          </button>
+
+          {showExportMenu && (
+            <div
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: 'calc(100% + 6px)',
+                background: '#1e293b',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 8,
+                padding: '6px',
+                zIndex: 50,
+                minWidth: 180,
+                boxShadow: '0 10px 25px -5px rgba(0,0,0,0.5)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+              }}
+            >
+              <button
+                onClick={() => handleExport('sarif')}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#e2e8f0', fontSize: 13, textAlign: 'left', borderRadius: 4, cursor: 'pointer' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <FileCode size={14} style={{ color: '#38bdf8' }} /> SARIF v2.1.0 (.sarif)
+              </button>
+              <button
+                onClick={() => handleExport('csv')}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#e2e8f0', fontSize: 13, textAlign: 'left', borderRadius: 4, cursor: 'pointer' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <FileText size={14} style={{ color: '#34d399' }} /> CSV Spreadsheet (.csv)
+              </button>
+              <button
+                onClick={() => handleExport('html')}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#e2e8f0', fontSize: 13, textAlign: 'left', borderRadius: 4, cursor: 'pointer' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <ExternalLink size={14} style={{ color: '#fbbf24' }} /> HTML Audit Report (.html)
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Bulk actions */}
