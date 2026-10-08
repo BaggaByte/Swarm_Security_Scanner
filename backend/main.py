@@ -44,15 +44,40 @@ from . import database as db
 async def _check_models_ready(model: str, challenger_model: str):
     import urllib.request
     import urllib.error
+    load_dotenv(override=True)
     requested_models = [name for name in (model, challenger_model) if name]
     groq_models = [name for name in requested_models if name.startswith("groq/")]
-    missing_groq_key = bool(groq_models and not os.environ.get("GROQ_API_KEY"))
-    if missing_groq_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GROQ_API_KEY is required for the selected Groq model. Repository code will be sent to Groq.",
-        )
-    local_models = [name for name in requested_models if not name.startswith("groq/")]
+    nim_models = [
+        name for name in requested_models 
+        if name.startswith(("nvidia/", "nim/")) or (bool(os.environ.get("NVIDIA_API_KEY")) and name.startswith(("meta/", "ibm/", "microsoft/")))
+    ]
+    if nim_models:
+        nim_key = (os.environ.get("NVIDIA_API_KEY") or os.environ.get("NIM_API_KEY", "")).strip()
+        if not nim_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="NVIDIA_API_KEY is required for NVIDIA NIM models. Set NVIDIA_API_KEY in your .env file or choose local Ollama models.",
+            )
+        try:
+            req = urllib.request.Request(
+                "https://integrate.api.nvidia.com/v1/models",
+                headers={"Authorization": f"Bearer {nim_key}", "User-Agent": "Mozilla/5.0"},
+            )
+            def check_nim():
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    return resp.status
+            await asyncio.to_thread(check_nim)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or expired NVIDIA_API_KEY (HTTP 401/403). Please verify your NVIDIA NIM API key in your .env file.",
+                )
+        except Exception:
+            pass
+
+    cloud_models = set(groq_models + nim_models)
+    local_models = [name for name in requested_models if name not in cloud_models]
     ollama_url = os.environ.get("OLLAMA_URL")
     if not ollama_url or not local_models:
         return

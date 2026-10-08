@@ -55,6 +55,8 @@ const DEFAULT_REPO: RepoScanConfig = {
 };
 
 const MODEL_PRESETS = [
+  { id: 'nvidia/nemotron-3.5-lightning-30b-a3b', label: 'NVIDIA Nemotron 3.5 Lightning 30B (NIM)' },
+  { id: 'nvidia/llama-3.1-nemotron-70b-instruct', label: 'NVIDIA Nemotron 70B Instruct (NIM)' },
   { id: 'llama3.2', label: 'Llama 3.2 (Local Ollama)' },
   { id: 'qwen2.5-coder:7b', label: 'Qwen 2.5 Coder 7B (Local Ollama)' },
   { id: 'groq/openai/gpt-oss-120b', label: 'GPT OSS 120B (Groq)' },

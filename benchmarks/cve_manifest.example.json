@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Curated vulnerable/patched commit pairs. Verify each case against its advisory before use.",
+  "cases": [
+    {
+      "cve_id": "CVE-2023-36053",
+      "project": "django/django",
+      "repo_url": "https://github.com/django/django.git",
+      "vulnerable_ref": "1ea11365f61a78051e196e6123d5f987efa90df1",
+      "patched_ref": "b7c5feb35a31799de6e582ad6a5a91a9de74e0f9",
+      "expected_file": "django/core/validators.py",
+      "discovery_lines": [107, 115, 207],
+      "match_keywords": [
+        "emailvalidator",
+        "urlvalidator",
+        "regular expression denial of service"
+      ],
+      "severity": "MEDIUM",
+      "advisory_url": "https://www.djangoproject.com/weblog/2023/jul/03/security-releases/",
+      "patch_url": "https://github.com/django/django/commit/b7c5feb35a31799de6e582ad6a5a91a9de74e0f9"
+    }
+  ]
+}
+

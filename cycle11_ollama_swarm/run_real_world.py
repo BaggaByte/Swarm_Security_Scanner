@@ -684,7 +684,7 @@ def main():
     if not 1 <= args.challengers <= 2:
         parser.error("--challengers must be 1 or 2")
 
-    run_id = str(int(time.time()))
+    run_id = str(int(time.time() * 1000))
     import tempfile
     output_dir = Path(args.output_dir) if args.output_dir else Path(tempfile.gettempdir()) / "swarm_out"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -722,9 +722,9 @@ def main():
     client = LLMClient(model=args.model, base_url=args.url)
     challenger_client = LLMClient(model=args.challenger_model, base_url=args.url)
     for role, model_client in (("discovery", client), ("challenger", challenger_client)):
-        provider = "Groq API" if model_client.is_groq else "local Ollama"
+        provider = "NVIDIA NIM" if model_client.is_nim else ("Groq API" if model_client.is_groq else "local Ollama")
         _EMIT("SYSTEM", "runner", f"Model provider: {provider} — {role} {model_client.model}")
-        if model_client.is_groq:
+        if model_client.is_groq or model_client.is_nim:
             continue
         available = model_client.list_models()
         if not available:
@@ -799,6 +799,7 @@ def main():
     )
     
     # ── Phase 4: Challenge ─────────────────────────────────────────────────
+    confirmed_discovery = []
     if discovery_findings:
         confirmed_discovery = run_swarm_challenge(
             challenger_client, conn, discovery_findings, chunks, metrics, num_challengers=args.challengers
@@ -856,8 +857,8 @@ def main():
         "partial_reasons": partial_reasons,
         "discovery_model": args.model,
         "challenger_model": args.challenger_model,
-        "discovery_model_provider": "groq" if client.is_groq else "ollama",
-        "challenger_model_provider": "groq" if challenger_client.is_groq else "ollama",
+        "discovery_model_provider": "nim" if client.is_nim else ("groq" if client.is_groq else "ollama"),
+        "challenger_model_provider": "nim" if challenger_client.is_nim else ("groq" if challenger_client.is_groq else "ollama"),
         "sast_status": sast_statuses,
         "sast_triage": {
             "eligible_findings": triage_eligible,
@@ -890,6 +891,37 @@ def main():
         sast_path = output_dir / f"real_world_{run_id}_sast.json"
         sast_path.write_text(json.dumps(sast_findings, indent=2), encoding="utf-8")
         _EMIT("SYSTEM", "sast", f"SAST findings saved to {sast_path}")
+
+    def _redact_export(value):
+        if isinstance(value, str):
+            return redact_sensitive_content(value)
+        if isinstance(value, list):
+            return [_redact_export(item) for item in value]
+        if isinstance(value, dict):
+            return {key: _redact_export(item) for key, item in value.items()}
+        return value
+
+    findings_export = {
+        "run_id": run_id,
+        "sast": sast_findings,
+        "triage": [
+            {
+                "finding": item.get("sast_finding", {}),
+                "verdict": item.get("verdict", "INCONCLUSIVE"),
+                "confidence": item.get("confidence", "LOW"),
+                "rationale": item.get("rationale", ""),
+            }
+            for item in triage_results
+            if item.get("finding_idx", 1000) < 1000
+        ],
+        "confirmed_discoveries": confirmed_discovery,
+    }
+    findings_path = output_dir / f"real_world_{run_id}_findings.json"
+    findings_path.write_text(
+        json.dumps(_redact_export(findings_export), indent=2),
+        encoding="utf-8",
+    )
+    _EMIT("SYSTEM", "metrics", f"Scan findings saved to {findings_path}")
 
     conn.close()
     completion = f"completed with {' and '.join(partial_reasons)}" if partial_reasons else "complete"

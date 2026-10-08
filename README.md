@@ -556,6 +556,8 @@ Toggle between modes at any time. Both modes share the same SSE stream infrastru
 
 ## Metrics & Benchmarking
 
+Paired vulnerable/patched CVE scans are available through [the benchmark guide](benchmarks/README.md). It includes a curated manifest with immutable Django commit refs and writes per-run findings plus an incremental benchmark report under results/cve_benchmark by default.
+
 The `MetricsEngine` tracks the following per run and saves to `results/real_world_{run_id}_metrics.json`:
 
 | Metric | Description |

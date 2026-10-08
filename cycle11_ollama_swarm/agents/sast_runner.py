@@ -30,6 +30,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 from .redaction import redact_sensitive_content
@@ -190,7 +192,12 @@ def run_semgrep(repo_root: str, rulesets: Optional[list[str]] = None) -> list[di
         "--no-git-ignore",
         "--timeout", "60",
     ]
-    for pattern in (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", ".netrc", "credentials", "credentials.json"):
+    for pattern in (
+        ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+        ".netrc", "credentials", "credentials.json",
+        "node_modules", ".git", "dist", "build", ".venv", "venv", "env",
+        "vendor", "third_party", ".pytest_cache", ".mypy_cache", "*.egg-info",
+    ):
         cmd += ["--exclude", pattern]
     for rs in rulesets:
         cmd += ["--config", rs]
@@ -273,22 +280,62 @@ def run_all_sast_detailed(repo_root: str, tools: Optional[list[str]] = None) -> 
     if tools is None:
         tools = ["bandit", "semgrep"]
 
-    all_findings: list[dict] = []
-    statuses: dict[str, dict] = {}
     runners = {"bandit": run_bandit, "semgrep": run_semgrep}
-    for tool in tools:
-        runner = runners.get(tool.lower())
-        if runner is None:
-            statuses[tool] = {"status": "failed", "finding_count": 0, "error": "Unsupported SAST tool"}
-            continue
+    selected = [(tool, runners.get(tool.lower())) for tool in tools]
+    statuses: dict[str, dict] = {}
+
+    def run_tool(runner) -> tuple[Optional[list[dict]], float, Optional[str]]:
+        started = time.monotonic()
         try:
-            findings = runner(repo_root)
+            return runner(repo_root), time.monotonic() - started, None
         except Exception as exc:
-            statuses[tool] = {"status": "failed", "finding_count": 0, "error": str(exc)}
-            print(f"  [SAST] {tool}: FAILED — {exc}", flush=True)
+            return None, time.monotonic() - started, str(exc)
+
+    supported = [(tool, runner) for tool, runner in selected if runner is not None]
+    for tool, runner in selected:
+        if runner is None:
+            statuses[tool] = {
+                "status": "failed",
+                "finding_count": 0,
+                "duration_seconds": 0.0,
+                "error": "Unsupported SAST tool",
+            }
+
+    # SAST tools operate on the same immutable checkout and are independent.
+    # Run them together so total wall time is close to the slowest tool rather
+    # than the sum of their individual runtimes. Reassemble results in request
+    # order below to keep finding and status output deterministic.
+    with ThreadPoolExecutor(max_workers=max(1, len(supported))) as executor:
+        futures = {
+            executor.submit(run_tool, runner): tool
+            for tool, runner in supported
+        }
+        completed: dict[str, tuple[Optional[list[dict]], float, Optional[str]]] = {}
+        for future in as_completed(futures):
+            completed[futures[future]] = future.result()
+
+    all_findings: list[dict] = []
+    for tool, runner in selected:
+        if runner is None:
             continue
+        findings, duration, error = completed[tool]
+        if error is not None:
+            statuses[tool] = {
+                "status": "failed",
+                "finding_count": 0,
+                "duration_seconds": round(duration, 3),
+                "error": error,
+            }
+            print(f"  [SAST] {tool}: FAILED — {error}", flush=True)
+            continue
+        findings = findings or []
         all_findings.extend(findings)
-        statuses[tool] = {"status": "complete", "finding_count": len(findings), "error": None}
+        statuses[tool] = {
+            "status": "complete",
+            "finding_count": len(findings),
+            "duration_seconds": round(duration, 3),
+            "error": None,
+        }
 
     # Deduplicate by (file, line, rule_id)
     seen: set[tuple] = set()
