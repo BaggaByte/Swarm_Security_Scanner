@@ -250,10 +250,13 @@ def _scan_snapshot(
     metadata = json.loads(metadata_candidates[-1].read_text(encoding="utf-8"))
     findings = json.loads(findings_candidates[-1].read_text(encoding="utf-8"))
     discovery = metadata.get("discovery", {})
+    sast_triage = metadata.get("sast_triage", {})
     sast_statuses = metadata.get("sast_status", {})
+    discovery_complete = bool(discovery.get("coverage_complete") and not discovery.get("failed_chunks", 0))
+    sast_triage_complete = bool(sast_triage.get("coverage_complete", True))
     swarm_status = (
         "complete"
-        if discovery.get("coverage_complete") and not discovery.get("failed_chunks", 0)
+        if discovery_complete and sast_triage_complete
         else "partial"
     )
     sast_status = (
@@ -268,6 +271,7 @@ def _scan_snapshot(
         "swarm_status": swarm_status,
         "sast_status": sast_status,
         "discovery_coverage": discovery,
+        "sast_triage_coverage": sast_triage,
         "sast_tool_status": sast_statuses,
         "partial_reasons": metadata.get("partial_reasons", []),
         "duration_seconds": elapsed,
