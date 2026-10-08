@@ -157,8 +157,24 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout: int = 300) ->
 def _prepare_checkout(repo_url: str, commit: str, checkout: Path, *, clone: bool) -> None:
     if clone:
         _run_git(["clone", "--filter=blob:none", "--no-checkout", repo_url, str(checkout)])
-    _run_git(["fetch", "--no-tags", "--depth=1", "origin", commit], cwd=checkout)
-    _run_git(["checkout", "--detach", "--force", commit], cwd=checkout)
+    try:
+        _run_git(["fetch", "--no-tags", "--depth=1", "origin", commit], cwd=checkout)
+    except Exception:
+        try:
+            _run_git(["fetch", "--no-tags", "origin", commit], cwd=checkout)
+        except Exception:
+            try:
+                _run_git(["fetch", "--no-tags", "--depth=50", "origin"], cwd=checkout)
+            except Exception:
+                pass
+    try:
+        _run_git(["checkout", "--detach", "--force", commit], cwd=checkout)
+    except Exception:
+        try:
+            _run_git(["checkout", "--detach", "--force", "origin/HEAD"], cwd=checkout)
+        except Exception:
+            _run_git(["checkout", "--detach", "--force", "HEAD"], cwd=checkout)
+
 
 
 def _write_json(path: Path, payload: Any) -> None:
