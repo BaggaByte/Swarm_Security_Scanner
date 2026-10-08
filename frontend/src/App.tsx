@@ -20,11 +20,11 @@ const RepositoriesPage = React.lazy(() => import('./pages/RepositoriesPage'));
 const ScanPage = React.lazy(() => import('./pages/ScanPage'));
 const ArchitecturePage = React.lazy(() => import('./pages/ArchitecturePage'));
 const BenchmarkPage = React.lazy(() => import('./pages/BenchmarkPage'));
-
+const SettingsPage = React.lazy(() => import('./pages/SettingsPage'));
 
 // ── Nav items ──────────────────────────────────────────────────────────────────
 
-type PageId = 'dashboard' | 'architecture' | 'findings' | 'scans' | 'repositories' | 'scan' | 'benchmark';
+type PageId = 'dashboard' | 'architecture' | 'findings' | 'scans' | 'repositories' | 'scan' | 'benchmark' | 'settings';
 
 interface NavItem {
   id: PageId;
@@ -72,6 +72,11 @@ const NAV_ITEMS: NavItem[] = [
     id: 'benchmark',
     label: 'CVE Benchmark',
     icon: <Award size={17} />,
+  },
+  {
+    id: 'settings',
+    label: 'Settings & Org',
+    icon: <Settings size={17} />,
   },
 ];
 
@@ -271,6 +276,9 @@ export default function App() {
             )}
             {activePage === 'benchmark' && (
               <BenchmarkPage />
+            )}
+            {activePage === 'settings' && (
+              <SettingsPage />
             )}
           </React.Suspense>
         </main>

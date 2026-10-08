@@ -42,6 +42,8 @@ from .security import (
 from . import database as db
 from . import exporter
 from . import notifier
+from . import auto_remediator
+from . import licensing
 
 async def _check_models_ready(model: str, challenger_model: str):
     import urllib.request
@@ -480,6 +482,7 @@ async def list_ollama_models():
 
 @app.post("/api/scan", dependencies=[Security(require_api_key)])
 async def start_scan(request: ScanRequest):
+    licensing.enforce_quota()
     await _check_models_ready(request.model, request.challenger_model)
     # Check concurrent scans limit
     active_count = sum(1 for s in _runs.values() if s.status == "running")
@@ -489,6 +492,7 @@ async def start_scan(request: ScanRequest):
             detail=f"Maximum concurrent scans ({MAX_CONCURRENT_SCANS}) reached. Please wait for an existing scan to finish.",
         )
 
+    licensing.record_scan()
     run_id = str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     config = {
@@ -508,6 +512,7 @@ async def start_scan(request: ScanRequest):
 
 @app.post("/api/repo-scan", dependencies=[Security(require_api_key)])
 async def start_repo_scan(request: RepoScanRequest):
+    licensing.enforce_quota()
     await _check_models_ready(request.model, request.challenger_model)
     # Validate scan boundary & SSRF protection
     validated_repo = validate_scan_target(request.repo)
@@ -526,6 +531,7 @@ async def start_repo_scan(request: RepoScanRequest):
             detail=f"Maximum concurrent scans ({MAX_CONCURRENT_SCANS}) reached. Please wait for an existing scan to finish.",
         )
 
+    licensing.record_scan()
     run_id = str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     config = {
@@ -738,6 +744,58 @@ def remove_user(user_id: str):
 def get_audit_logs(limit: int = 100):
     """Retrieve security audit trails."""
     return db.list_audit_logs(limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3.2: Automated Remediation & PR Patch Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/remediate", dependencies=[Security(require_api_key)])
+def remediate_finding(req: RemediateRequest):
+    """Generate a fix proposal with explanation and code snippet."""
+    patch_result = auto_remediator.generate_security_patch(
+        file_path=req.file_path,
+        line_number=req.line_number,
+        code_snippet=req.code_snippet,
+        title="Security Vulnerability",
+        description=req.description,
+        model=req.model,
+    )
+    db.log_audit_event("analyst", "remediate_finding", "finding", req.finding_id, f"File: {req.file_path}")
+    return {
+        "finding_id": req.finding_id,
+        "remediation_suggestion": patch_result.get("fixed_code"),
+        "explanation": patch_result.get("explanation"),
+        "unified_diff": patch_result.get("unified_diff"),
+        "test_case": patch_result.get("test_case"),
+    }
+
+
+@app.post("/api/remediate/auto-patch", dependencies=[Security(require_api_key)])
+def generate_auto_patch(req: RemediateRequest):
+    """Generate a full drop-in unified git diff patch and test case."""
+    patch_result = auto_remediator.generate_security_patch(
+        file_path=req.file_path,
+        line_number=req.line_number,
+        code_snippet=req.code_snippet,
+        title="Security Finding",
+        description=req.description,
+        model=req.model,
+    )
+    db.log_audit_event("analyst", "generate_auto_patch", "finding", req.finding_id, f"Patch generated for {req.file_path}")
+    return patch_result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3.3: Licensing & Quota Status Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/licensing/status", dependencies=[Security(require_api_key)])
+def get_license_status():
+    """Retrieve active organization license tier and daily quota status."""
+    return licensing.get_quota_status()
+
+
 
 
 
