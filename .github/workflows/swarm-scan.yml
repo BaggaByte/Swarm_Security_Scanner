@@ -1,0 +1,42 @@
+name: Swarm Security Scan
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # Run nightly security audit
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  swarm-security-scan:
+    name: Swarm Multi-Agent Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # Required for uploading SARIF to GitHub Code Scanning
+      pull-requests: write   # Required for PR annotations
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Swarm Security Scanner
+        id: swarm_scan
+        uses: BaggaByte/Swarm_Security_Scanner@main
+        with:
+          api_url: ${{ secrets.SWARM_API_URL || 'https://swarm.yourcompany.internal' }}
+          api_key: ${{ secrets.SWARM_API_KEY }}
+          fail_on_severity: 'CRITICAL'
+          sarif_output: 'results/swarm_security.sarif'
+          model: 'llama3.2'
+          challenger_model: 'qwen2.5-coder:7b'
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'results/swarm_security.sarif'
+          category: 'swarm-security-scanner'

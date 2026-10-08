@@ -41,6 +41,7 @@ from .security import (
 )
 from . import database as db
 from . import exporter
+from . import notifier
 
 async def _check_models_ready(model: str, challenger_model: str):
     import urllib.request
@@ -221,6 +222,23 @@ class VerifyRequest(BaseModel):
     model: str = "qwen2.5-coder:7b"
     target_url: str = "http://localhost:5000"
 
+class NotificationSettingRequest(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    webhook_url: str = Field(..., min_length=5, max_length=1000)
+    channel_type: str = Field(default="generic", pattern=r"^(slack|discord|teams|generic)$")
+    enabled: bool = True
+    notify_on_critical: bool = True
+    notify_on_complete: bool = True
+
+class NotificationTestRequest(BaseModel):
+    webhook_url: str
+    channel_type: str = "generic"
+
+class UserCreateRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=200)
+    name: str = Field(..., min_length=1, max_length=100)
+    role: str = Field(default="analyst", pattern=r"^(admin|analyst|viewer)$")
+
 # ---------------------------------------------------------------------------
 # Background Process Runners
 # ---------------------------------------------------------------------------
@@ -394,6 +412,25 @@ async def _run_repo_swarm(run_id: str, req: RepoScanRequest, loop: asyncio.Abstr
             db.update_run_status(run_id, run_status, exit_code)
             asyncio.run_coroutine_threadsafe(state.queue.put(done_payload), loop)
             state.status = run_status
+
+            # Outgoing notifications dispatch
+            try:
+                configs = db.get_notification_settings()
+                if configs:
+                    all_findings = db.list_findings()
+                    run_findings = [f for f in all_findings if f.get("scanId") == run_id]
+                    scan_meta = {"run_id": run_id, "repo": req.repo, "status": run_status}
+                    for c_dict in configs:
+                        cfg = notifier.NotificationConfig(
+                            webhook_url=c_dict["webhook_url"],
+                            channel_type=c_dict["channel_type"],
+                            enabled=c_dict["enabled"],
+                            notify_on_critical=c_dict["notify_on_critical"],
+                            notify_on_complete=c_dict["notify_on_complete"],
+                        )
+                        notifier.dispatch_scan_notification(cfg, scan_meta, run_findings)
+            except Exception as notify_err:
+                print(f"[Notifier] Failed to dispatch notifications: {notify_err}")
 
         except Exception as exc:
             err = json.dumps({"type": "ERROR", "agent": "runner", "content": str(exc)})
@@ -629,6 +666,79 @@ def diff_scan_runs(
     findings_b = [f for f in findings if f.get("scanId") == scan_b]
     
     return exporter.diff_scans(findings_a, findings_b)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2.2: Notifications & Webhook Settings Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings/notifications", dependencies=[Security(require_api_key)])
+def get_notifications():
+    """List configured outgoing webhook destinations (Slack, Discord, Teams)."""
+    return db.get_notification_settings()
+
+
+@app.post("/api/settings/notifications", dependencies=[Security(require_api_key)])
+def save_notification(req: NotificationSettingRequest):
+    """Save or update an outgoing webhook notification setting."""
+    db.save_notification_setting(
+        req.id,
+        req.webhook_url,
+        req.channel_type,
+        req.enabled,
+        req.notify_on_critical,
+        req.notify_on_complete,
+    )
+    db.log_audit_event("admin", "update_notification_setting", "webhook", req.id, f"Channel: {req.channel_type}")
+    return {"status": "ok", "id": req.id}
+
+
+@app.post("/api/settings/notifications/test", dependencies=[Security(require_api_key)])
+def test_notification(req: NotificationTestRequest):
+    """Send a test notification to verify webhook channel configuration."""
+    cfg = notifier.NotificationConfig(webhook_url=req.webhook_url, channel_type=req.channel_type)
+    test_scan = {"repo": "https://github.com/org/test-repo", "run_id": "test-run-1234", "status": "complete"}
+    test_findings = [
+        {"title": "Test Critical Vulnerability", "severity": "CRITICAL", "file": "src/auth.py", "line": 42, "swarmRationale": "Test alert rationale"}
+    ]
+    success = notifier.dispatch_scan_notification(cfg, test_scan, test_findings)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to deliver test webhook. Please verify webhook URL and channel type.")
+    return {"status": "ok", "message": "Test notification delivered successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2.3: Users, RBAC & Audit Trails
+# ---------------------------------------------------------------------------
+
+@app.get("/api/users", dependencies=[Security(require_api_key)])
+def get_users():
+    """List organization team members and their RBAC roles."""
+    return db.list_users()
+
+
+@app.post("/api/users", dependencies=[Security(require_api_key)])
+def add_user(req: UserCreateRequest):
+    """Add a new user / team member with assigned RBAC role."""
+    user_id = str(uuid.uuid4())
+    user = db.create_user(user_id, req.email, req.name, req.role)
+    db.log_audit_event("admin", "create_user", "user", user_id, f"Email: {req.email}, Role: {req.role}")
+    return user
+
+
+@app.delete("/api/users/{user_id}", dependencies=[Security(require_api_key)])
+def remove_user(user_id: str):
+    """Remove a team member."""
+    db.delete_user(user_id)
+    db.log_audit_event("admin", "delete_user", "user", user_id)
+    return {"status": "ok"}
+
+
+@app.get("/api/audit-logs", dependencies=[Security(require_api_key)])
+def get_audit_logs(limit: int = 100):
+    """Retrieve security audit trails."""
+    return db.list_audit_logs(limit=limit)
+
 
 
 

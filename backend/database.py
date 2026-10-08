@@ -145,6 +145,39 @@ def init_db():
                         run_json TEXT NOT NULL
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS notification_settings (
+                        id TEXT PRIMARY KEY,
+                        webhook_url TEXT NOT NULL,
+                        channel_type TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        notify_on_critical INTEGER NOT NULL DEFAULT 1,
+                        notify_on_complete INTEGER NOT NULL DEFAULT 1,
+                        updated_at REAL NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id TEXT PRIMARY KEY,
+                        email TEXT UNIQUE NOT NULL,
+                        name TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'analyst',
+                        api_key_hash TEXT,
+                        created_at REAL NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_email TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        resource_type TEXT NOT NULL,
+                        resource_id TEXT,
+                        details TEXT,
+                        timestamp REAL NOT NULL
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp)")
         finally:
             _release_connection(conn)
 
@@ -411,3 +444,115 @@ def list_frontend_runs() -> List[Dict[str, Any]]:
             return [json.loads(row["run_json"]) for row in cur.fetchall()]
         finally:
             _release_connection(conn)
+
+
+# ---------------------------------------------------------------------------
+# Notification Settings Persistence
+# ---------------------------------------------------------------------------
+
+def save_notification_setting(setting_id: str, webhook_url: str, channel_type: str, enabled: bool, notify_on_critical: bool, notify_on_complete: bool):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO notification_settings (
+                        id, webhook_url, channel_type, enabled, notify_on_critical, notify_on_complete, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    setting_id, webhook_url, channel_type,
+                    1 if enabled else 0,
+                    1 if notify_on_critical else 0,
+                    1 if notify_on_complete else 0,
+                    time.time()
+                ))
+        finally:
+            _release_connection(conn)
+
+
+def get_notification_settings() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM notification_settings")
+            return [
+                {
+                    "id": row["id"],
+                    "webhook_url": row["webhook_url"],
+                    "channel_type": row["channel_type"],
+                    "enabled": bool(row["enabled"]),
+                    "notify_on_critical": bool(row["notify_on_critical"]),
+                    "notify_on_complete": bool(row["notify_on_complete"]),
+                    "updated_at": row["updated_at"],
+                }
+                for row in cur.fetchall()
+            ]
+        finally:
+            _release_connection(conn)
+
+
+# ---------------------------------------------------------------------------
+# Users & RBAC Team Management
+# ---------------------------------------------------------------------------
+
+def create_user(user_id: str, email: str, name: str, role: str = "analyst", api_key_hash: Optional[str] = None) -> Dict[str, Any]:
+    now = time.time()
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO users (id, email, name, role, api_key_hash, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (user_id, email, name, role, api_key_hash, now))
+        finally:
+            _release_connection(conn)
+    return {"id": user_id, "email": email, "name": name, "role": role, "created_at": now}
+
+
+def list_users() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT id, email, name, role, created_at FROM users ORDER BY created_at ASC")
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            _release_connection(conn)
+
+
+def delete_user(user_id: str):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        finally:
+            _release_connection(conn)
+
+
+# ---------------------------------------------------------------------------
+# Audit Logs
+# ---------------------------------------------------------------------------
+
+def log_audit_event(user_email: str, action: str, resource_type: str, resource_id: Optional[str] = None, details: Optional[str] = None):
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT INTO audit_logs (user_email, action, resource_type, resource_id, details, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (user_email, action, resource_type, resource_id, details, time.time()))
+        finally:
+            _release_connection(conn)
+
+
+def list_audit_logs(limit: int = 100) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cur = conn.execute("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            _release_connection(conn)
+

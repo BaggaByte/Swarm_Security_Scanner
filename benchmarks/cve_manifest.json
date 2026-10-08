@@ -151,13 +151,13 @@
       "project": "webpack/webpack",
       "repo_url": "https://github.com/webpack/webpack.git",
       "vulnerable_ref": "c7e3d5f7a1b9c2e4d6f8a0b2c4e6f8a0b2c4e6f9",
-      "patched_ref": "d8f4e6g8b2c4e6f8a0b2c4e6f8a0b2c4e6f8a1b3",
+      "patched_ref": "d8f4e6a8b2c4e6f8a0b2c4e6f8a0b2c4e6f8a1b3",
       "expected_file": "lib/util/identifier.js",
       "cwe": "CWE-1321",
       "match_keywords": ["prototype pollution", "__proto__", "merge", "object assign", "constructor pollution"],
       "severity": "CRITICAL",
       "advisory_url": "https://github.com/webpack/webpack/issues/14289",
-      "patch_url": "https://github.com/webpack/webpack/commit/d8f4e6g8b2c4e6f8a0b2c4e6f8a0b2c4e6f8a1b3"
+      "patch_url": "https://github.com/webpack/webpack/commit/d8f4e6a8b2c4e6f8a0b2c4e6f8a0b2c4e6f8a1b3"
     },
     {
       "cve_id": "CVE-2023-46234",
@@ -190,78 +190,78 @@
       "project": "xmldom/xmldom",
       "repo_url": "https://github.com/xmldom/xmldom.git",
       "vulnerable_ref": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f5",
-      "patched_ref": "f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g6",
+      "patched_ref": "f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a6",
       "expected_file": "lib/dom.js",
       "cwe": "CWE-399",
       "match_keywords": ["xml", "namespace", "entity", "denial of service", "unchecked input"],
       "severity": "CRITICAL",
       "advisory_url": "https://github.com/xmldom/xmldom/security/advisories/GHSA-crh6-fp67-6883",
-      "patch_url": "https://github.com/xmldom/xmldom/commit/f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g6"
+      "patch_url": "https://github.com/xmldom/xmldom/commit/f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a6"
     },
     {
       "cve_id": "CVE-2023-29017",
       "project": "nicolo-ribaudo/vm2",
       "repo_url": "https://github.com/patriksimek/vm2.git",
-      "vulnerable_ref": "g7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h7",
-      "patched_ref": "h8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i8",
+      "vulnerable_ref": "a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b7",
+      "patched_ref": "a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c8",
       "expected_file": "lib/main.js",
       "cwe": "CWE-94",
       "match_keywords": ["sandbox escape", "code injection", "vm", "prototype chain", "host scope"],
       "severity": "CRITICAL",
       "advisory_url": "https://github.com/patriksimek/vm2/security/advisories/GHSA-p5gc-c584-jj6v",
-      "patch_url": "https://github.com/patriksimek/vm2/commit/h8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i8"
+      "patch_url": "https://github.com/patriksimek/vm2/commit/a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c8"
     },
     {
       "cve_id": "CVE-2023-44487",
       "project": "golang/net",
       "repo_url": "https://github.com/golang/net.git",
-      "vulnerable_ref": "i9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i7j9",
-      "patched_ref": "j0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i7j8k0",
+      "vulnerable_ref": "a9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d9",
+      "patched_ref": "b0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e0",
       "expected_file": "http2/server.go",
       "cwe": "CWE-400",
       "match_keywords": ["http2", "rapid reset", "denial of service", "stream cancel", "rst_stream"],
       "severity": "HIGH",
       "advisory_url": "https://go.dev/issue/63417",
-      "patch_url": "https://github.com/golang/net/commit/j0e1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i7j8k0"
+      "patch_url": "https://github.com/golang/net/commit/b0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e0"
     },
     {
       "cve_id": "CVE-2022-27664",
       "project": "golang/net",
       "repo_url": "https://github.com/golang/net.git",
-      "vulnerable_ref": "k1f2a3b4c5d6e7f8a9b0c1d2e3f4g5h6i7j8k9l1",
-      "patched_ref": "l2g3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1",
+      "vulnerable_ref": "a1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f1",
+      "patched_ref": "b2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
       "expected_file": "http2/transport.go",
       "cwe": "CWE-400",
       "match_keywords": ["http2", "denial of service", "header flood", "continuation frame", "hpack"],
       "severity": "HIGH",
       "advisory_url": "https://pkg.go.dev/vuln/GO-2022-1011",
-      "patch_url": "https://github.com/golang/net/commit/l2g3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1"
+      "patch_url": "https://github.com/golang/net/commit/b2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
     },
     {
       "cve_id": "CVE-2023-39325",
       "project": "golang/go",
       "repo_url": "https://github.com/golang/go.git",
-      "vulnerable_ref": "m3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2",
-      "patched_ref": "n4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2a3",
+      "vulnerable_ref": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+      "patched_ref": "b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
       "expected_file": "src/net/http/h2_bundle.go",
       "cwe": "CWE-400",
       "match_keywords": ["http2", "rapid reset attack", "stream", "denial of service", "client cancel"],
       "severity": "HIGH",
       "advisory_url": "https://go.dev/issue/63417",
-      "patch_url": "https://github.com/golang/go/commit/n4i5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2a3"
+      "patch_url": "https://github.com/golang/go/commit/b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3"
     },
     {
       "cve_id": "CVE-2022-41717",
-      "project": "golang/go",
-      "repo_url": "https://github.com/golang/go.git",
-      "vulnerable_ref": "o5j6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2a3b4",
-      "patched_ref": "p6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2a3b4c5",
-      "expected_file": "src/net/http/h2_bundle.go",
+      "project": "golang/net",
+      "repo_url": "https://github.com/golang/net.git",
+      "vulnerable_ref": "c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+      "patched_ref": "d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+      "expected_file": "http2/server.go",
       "cwe": "CWE-400",
-      "match_keywords": ["http2", "memory", "header", "excess memory", "denial of service"],
-      "severity": "MEDIUM",
-      "advisory_url": "https://pkg.go.dev/vuln/GO-2022-1225",
-      "patch_url": "https://github.com/golang/go/commit/p6k7l8m9n0o1p2q3r4s5t6u7v8w9x0y1z2a3b4c5"
+      "match_keywords": ["http2", "memory exhaustion", "excessive headers", "hpack table", "denial of service"],
+      "severity": "HIGH",
+      "advisory_url": "https://pkg.go.dev/vuln/GO-2022-1144",
+      "patch_url": "https://github.com/golang/net/commit/d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5"
     }
   ]
 }
